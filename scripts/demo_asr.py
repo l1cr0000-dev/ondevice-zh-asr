@@ -19,8 +19,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.asr import DEFAULT_MODEL, SAMPLE_RATE, available_models, load_asr
-from src.asr.sherpa import MODELS_DIR, ZIPFORMER_ZH_14M
-from src.vad import load_wav
+from src.asr.sherpa import ZIPFORMER_ZH_14M
+from src.audio import load_wav
+from src.cli import positive_int
+from src.paths import MODELS_DIR
 
 DEFAULT_WAV = MODELS_DIR / ZIPFORMER_ZH_14M.model_dir / "test_wavs" / "0.wav"
 
@@ -32,22 +34,20 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("wav", nargs="?", type=Path, default=DEFAULT_WAV, help="16 kHz wav 檔")
     p.add_argument("--model", default=DEFAULT_MODEL, choices=available_models(), help="ASR 模型")
-    p.add_argument("--threads", type=int, default=1, help="推論執行緒數")
-    p.add_argument("--chunk-ms", type=int, default=10, help="每次送入的音訊長度")
+    p.add_argument("--threads", type=positive_int, default=1, help="推論執行緒數")
+    p.add_argument("--chunk-ms", type=positive_int, default=10, help="每次送入的音訊長度")
     p.add_argument("--fast", action="store_true", help="不依音訊時長節奏等待，盡快送完所有 chunk")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    if args.chunk_ms <= 0:
-        print("錯誤：--chunk-ms 必須為正數", file=sys.stderr)
-        return 2
     try:
-        audio = load_wav(args.wav)
+        # 先載入模型：預設 wav 在模型目錄內，模型未下載時應提示下載而不是「找不到 wav」
         t_load = time.perf_counter()
         asr = load_asr(args.model, num_threads=args.threads)
         load_s = time.perf_counter() - t_load
+        audio = load_wav(args.wav)
     except (ValueError, FileNotFoundError) as e:
         print(f"錯誤：{e}", file=sys.stderr)
         return 1

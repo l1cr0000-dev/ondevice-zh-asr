@@ -17,6 +17,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from src.cli import positive_int
 from src.vad import (
     DEFAULT_MODEL_PATH,
     SAMPLE_RATE,
@@ -44,9 +45,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="結束語音的機率閾值（遲滯）；預設 threshold - 0.15",
     )
-    p.add_argument(
-        "--min-speech-ms", type=int, default=defaults.min_speech_ms, help="最短語音長度"
-    )
+    p.add_argument("--min-speech-ms", type=int, default=defaults.min_speech_ms, help="最短語音長度")
     p.add_argument(
         "--min-silence-ms", type=int, default=defaults.min_silence_ms, help="切段所需最短靜音"
     )
@@ -54,9 +53,9 @@ def parse_args() -> argparse.Namespace:
         "--speech-pad-ms", type=int, default=defaults.speech_pad_ms, help="語音段前後延伸"
     )
     p.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH, help="Silero VAD ONNX 模型")
-    p.add_argument("--threads", type=int, default=1, help="ONNX Runtime intra-op 執行緒數")
+    p.add_argument("--threads", type=positive_int, default=1, help="ONNX Runtime intra-op 執行緒數")
     p.add_argument("--stream", action="store_true", help="以串流方式逐 chunk 送入並印出事件")
-    p.add_argument("--chunk-ms", type=int, default=10, help="串流模式的 chunk 長度")
+    p.add_argument("--chunk-ms", type=positive_int, default=10, help="串流模式的 chunk 長度")
     return p.parse_args()
 
 

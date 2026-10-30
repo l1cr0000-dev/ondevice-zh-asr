@@ -37,7 +37,11 @@ from typing import Any
 
 import soundfile as sf  # type: ignore[import-untyped]
 
+# 讓 `uv run scripts/prepare_eval_data.py` 能直接 import src（專案本身沒有安裝成套件）
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from src.audio import SAMPLE_RATE
 
 HF_REPO = "shenyunhang/AISHELL-1"
 HF_REVISION = "2724409d538167445e43ebf846990319f12a1cbf"
@@ -131,6 +135,21 @@ def main() -> int:
     if not 0 < args.num <= TEST_SET_SIZE:
         print(f"錯誤：-n 必須在 1–{TEST_SET_SIZE}", file=sys.stderr)
         return 2
+    if args.jobs <= 0:
+        print("錯誤：--jobs 必須為正數", file=sys.stderr)
+        return 2
+    try:
+        return prepare(args)
+    except OSError as e:  # 網路錯誤（urllib 的 URLError / HTTPError 都是 OSError）或寫檔失敗
+        print(f"錯誤：{type(e).__name__}: {e}", file=sys.stderr)
+        print("可重新執行；已下載且校驗通過的檔案會跳過。", file=sys.stderr)
+        return 1
+    except RuntimeError as e:  # checksum 不符、音訊格式不符
+        print(f"錯誤：{e}", file=sys.stderr)
+        return 1
+
+
+def prepare(args: argparse.Namespace) -> int:
 
     print(f"列出 {HF_REPO}@{HF_REVISION[:10]} 的 test set …", file=sys.stderr)
     files: dict[str, dict[str, Any]] = {}
@@ -162,7 +181,7 @@ def main() -> int:
     with open(args.out / "manifest.jsonl", "w", encoding="utf-8") as fp:
         for uid in chosen:
             info = sf.info(str(wav_dir / f"{uid}.wav"))
-            if info.samplerate != 16000 or info.channels != 1:
+            if info.samplerate != SAMPLE_RATE or info.channels != 1:
                 raise RuntimeError(
                     f"{uid}: {info.samplerate} Hz / {info.channels} ch，預期 16 kHz 單聲道"
                 )

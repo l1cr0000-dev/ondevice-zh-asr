@@ -20,7 +20,6 @@ import platform
 import subprocess
 import sys
 import time
-import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import date
 from importlib import metadata
@@ -192,6 +191,7 @@ def _first_with_text(segments: list[dict[str, Any]]) -> dict[str, Any] | None:
 def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> dict[str, Any]:
     from eval.metrics import corpus_cer, summarize
     from eval.text_norm import normalize
+    from src.vad import VAD_MODEL_NAME
 
     utts = raw["utterances"]
     cer = corpus_cer([u["ref"] for u in utts], [u["hyp"] for u in utts])
@@ -227,7 +227,7 @@ def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> d
         "config": {
             **asdict(cfg),
             "asr_name": raw["asr_name"],
-            "vad_model": "silero-vad-v6.2.3",
+            "vad_model": VAD_MODEL_NAME,
             "timing": "simulated-realtime",
         },
         "environment": env,
@@ -295,11 +295,9 @@ def table_row(res: dict[str, Any]) -> str:
     )
 
 
-def _display_width(text: str) -> int:
-    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
-
-
 def print_detail(res: dict[str, Any]) -> None:
+    from src.cli import display_width
+
     c, m, env = res["config"], res["metrics"], res["environment"]
     ft, tail, cc = m["first_token_latency_ms"], m["tail_latency_ms"], m["cer_counts"]
     seg = m["segments_per_utterance"]
@@ -339,42 +337,27 @@ def print_detail(res: dict[str, Any]) -> None:
         ("記憶體 (MB)", mem_s),
         ("模型大小 (MB)", f"{m['model_size_mb']:.1f}"),
     ]
-    width = max(_display_width(k) for k, _ in lines)
+    width = max(display_width(k) for k, _ in lines)
     print("-" * 72)
     for k, v in lines:
-        print(f"{k}{' ' * (width - _display_width(k))}  {v}")
+        print(f"{k}{' ' * (width - display_width(k))}  {v}")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    from src.asr import DEFAULT_MODEL, available_models
-    from src.pipeline import PipelineConfig
+    from src.cli import add_pipeline_args, non_negative_int, positive_int
 
-    vad = PipelineConfig().vad
     p = argparse.ArgumentParser(
         description="全鏈路評測（VAD + 串流 ASR）。多個值的參數取笛卡兒積做掃描。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help="評測集 manifest")
+    add_pipeline_args(p, sweep=True)
     p.add_argument(
-        "--model", nargs="+", default=[DEFAULT_MODEL], choices=available_models(), help="ASR 模型"
+        "--warmup", type=non_negative_int, default=3, help="正式計時前先跑幾句暖機（不計入）"
     )
-    p.add_argument("--threads", nargs="+", type=int, default=[1], help="推論執行緒數")
-    p.add_argument("--chunk-ms", nargs="+", type=int, default=[10], help="每次送入的音訊長度")
     p.add_argument(
-        "--pre-roll-ms",
-        nargs="+",
-        type=int,
-        default=[PipelineConfig().pre_roll_ms],
-        help="pre-roll",
+        "--limit", type=positive_int, help="只評測前 N 句（除錯用，結果名稱會加上 _limN）"
     )
-    p.add_argument("--threshold", type=float, default=vad.threshold, help="VAD 語音閾值")
-    p.add_argument("--min-speech-ms", type=int, default=vad.min_speech_ms, help="VAD 最短語音")
-    p.add_argument(
-        "--min-silence-ms", nargs="+", type=int, default=[vad.min_silence_ms], help="VAD 切段靜音"
-    )
-    p.add_argument("--speech-pad-ms", type=int, default=vad.speech_pad_ms, help="VAD 前後延伸")
-    p.add_argument("--warmup", type=int, default=3, help="正式計時前先跑幾句暖機（不計入）")
-    p.add_argument("--limit", type=int, help="只評測前 N 句（除錯用，結果名稱會加上 _limN）")
     p.add_argument("--tag", default="", help="掃描總表檔名的標籤")
     p.add_argument("--results-dir", type=Path, default=RESULTS_DIR, help="結果輸出目錄")
     return p.parse_args(argv)
@@ -394,8 +377,12 @@ def main() -> int:
         )
         return 1
     manifest = args.manifest.resolve()
+    lines = [line for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not lines:
+        print(f"錯誤：{manifest} 是空的", file=sys.stderr)
+        return 1
     if args.limit:
-        lines = manifest.read_text(encoding="utf-8").splitlines()[: args.limit]
+        lines = lines[: args.limit]
         limited = args.results_dir / ".tmp" / f"{manifest.parent.name}_lim{args.limit}.jsonl"
         limited.parent.mkdir(parents=True, exist_ok=True)
         # wav 路徑相對 manifest，改成絕對路徑

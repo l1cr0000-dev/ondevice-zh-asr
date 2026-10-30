@@ -5,6 +5,8 @@ import importlib
 import pytest
 
 
-@pytest.mark.parametrize("module", ["src.vad", "src.asr", "src.pipeline", "eval"])
+@pytest.mark.parametrize(
+    "module", ["src.audio", "src.paths", "src.cli", "src.vad", "src.asr", "src.pipeline", "eval"]
+)
 def test_module_importable(module: str) -> None:
     importlib.import_module(module)

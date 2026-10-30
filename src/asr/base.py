@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-SAMPLE_RATE = 16000
+from src.audio import SAMPLE_RATE
 
 
 class AsrStream(ABC):

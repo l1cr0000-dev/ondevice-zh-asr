@@ -17,6 +17,8 @@ data/*
 
 # 評測輸出
 eval/results/
+# scripts/run_pipeline.py -o 範例輸出
+/out*.json
 
 # Python
 .venv/

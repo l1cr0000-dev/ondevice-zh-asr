@@ -21,7 +21,7 @@ from typing import Literal, Protocol
 import numpy as np
 import numpy.typing as npt
 
-from src.vad.silero import SAMPLE_RATE
+from src.audio import SAMPLE_RATE
 
 
 class FrameClassifier(Protocol):

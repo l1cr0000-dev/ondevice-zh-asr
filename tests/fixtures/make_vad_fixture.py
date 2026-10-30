@@ -45,7 +45,9 @@ def main() -> None:
     pos = len(gap)
     for text in UTTERANCES:
         clip = synthesize(text)
-        truth.append({"text": text, "start": pos / SAMPLE_RATE, "end": (pos + len(clip)) / SAMPLE_RATE})
+        truth.append(
+            {"text": text, "start": pos / SAMPLE_RATE, "end": (pos + len(clip)) / SAMPLE_RATE}
+        )
         parts += [clip, gap]
         pos += len(clip) + len(gap)
     audio = np.concatenate(parts)

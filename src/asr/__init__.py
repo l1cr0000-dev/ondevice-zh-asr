@@ -9,7 +9,7 @@
 
 from collections.abc import Callable
 
-from src.asr.base import SAMPLE_RATE, AsrStream, StreamingAsr
+from src.asr.base import AsrStream, StreamingAsr
 from src.asr.sherpa import (
     X_ASR_480MS,
     ZIPFORMER_ZH_14M,
@@ -17,6 +17,7 @@ from src.asr.sherpa import (
     SherpaTransducerConfig,
     TransducerFiles,
 )
+from src.audio import SAMPLE_RATE
 
 __all__ = [
     "DEFAULT_MODEL",

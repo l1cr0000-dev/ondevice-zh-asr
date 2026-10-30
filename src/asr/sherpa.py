@@ -7,9 +7,9 @@ import numpy as np
 import numpy.typing as npt
 import sherpa_onnx  # type: ignore[import-untyped]
 
-from src.asr.base import SAMPLE_RATE, AsrStream, StreamingAsr
-
-MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
+from src.asr.base import AsrStream, StreamingAsr
+from src.audio import SAMPLE_RATE
+from src.paths import MODELS_DIR
 
 
 @dataclass(frozen=True)

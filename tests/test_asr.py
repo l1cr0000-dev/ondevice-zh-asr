@@ -15,7 +15,8 @@ import numpy.typing as npt
 import pytest
 
 from src.asr import SAMPLE_RATE, AsrStream, StreamingAsr, available_models, load_asr
-from src.asr.sherpa import MODELS_DIR, ZIPFORMER_ZH_14M
+from src.asr.sherpa import ZIPFORMER_ZH_14M
+from src.paths import MODELS_DIR
 from src.vad import load_wav
 
 # 兩個模型都用 zh-14M 壓縮檔自帶的 0.wav / 1.wav，因為只有這兩句有人工標註

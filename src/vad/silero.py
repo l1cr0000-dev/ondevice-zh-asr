@@ -16,12 +16,14 @@ import numpy as np
 import numpy.typing as npt
 import onnxruntime as ort  # type: ignore[import-untyped]
 
-SAMPLE_RATE = 16000
+from src.audio import SAMPLE_RATE
+from src.paths import MODELS_DIR
+
 FRAME_SIZE = 512  # 32 ms
 CONTEXT_SIZE = 64
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODEL_PATH = REPO_ROOT / "models" / "silero-vad-v6.2.3" / "silero_vad.onnx"
+VAD_MODEL_NAME = "silero-vad-v6.2.3"  # 與 scripts/download_models.sh 的目錄名一致，寫入評測報告
+DEFAULT_MODEL_PATH = MODELS_DIR / VAD_MODEL_NAME / "silero_vad.onnx"
 
 
 class SileroVadModel:

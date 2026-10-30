@@ -23,12 +23,12 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.asr import DEFAULT_MODEL, SAMPLE_RATE, available_models, load_asr
-from src.pipeline import PipelineConfig, Utterance, transcribe
-from src.vad import SileroVadModel, VadConfig, load_wav
+from src.asr import SAMPLE_RATE, load_asr
+from src.cli import add_pipeline_args, pipeline_config_from_args
+from src.pipeline import Utterance, transcribe
+from src.vad import VAD_MODEL_NAME, SileroVadModel, load_wav
 
 DEFAULT_WAV = REPO_ROOT / "tests" / "fixtures" / "vad_two_utterances.wav"
-_DEFAULT_VAD = PipelineConfig().vad
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,25 +38,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("wav", nargs="?", type=Path, default=DEFAULT_WAV, help="16 kHz wav 檔")
     p.add_argument("-o", "--output", type=Path, help="輸出 JSON 路徑；不給則印到 stdout")
-    p.add_argument("--model", default=DEFAULT_MODEL, choices=available_models(), help="ASR 模型")
-    p.add_argument("--threads", type=int, default=1, help="ASR / VAD 推論執行緒數")
-    p.add_argument("--chunk-ms", type=int, default=10, help="每次送入的音訊長度")
-    p.add_argument(
-        "--pre-roll-ms",
-        type=int,
-        default=PipelineConfig().pre_roll_ms,
-        help="送入 ASR 時比 VAD 起點再往前多取的音訊長度",
-    )
-    p.add_argument("--threshold", type=float, default=_DEFAULT_VAD.threshold, help="VAD 語音閾值")
-    p.add_argument(
-        "--min-speech-ms", type=int, default=_DEFAULT_VAD.min_speech_ms, help="VAD 最短語音"
-    )
-    p.add_argument(
-        "--min-silence-ms", type=int, default=_DEFAULT_VAD.min_silence_ms, help="VAD 切段靜音"
-    )
-    p.add_argument(
-        "--speech-pad-ms", type=int, default=_DEFAULT_VAD.speech_pad_ms, help="VAD 前後延伸"
-    )
+    add_pipeline_args(p)
     p.add_argument("--partials", action="store_true", help="輸出每句的 partial 變化歷程")
     return p.parse_args()
 
@@ -90,19 +72,8 @@ def utterance_json(utt: Utterance, with_partials: bool) -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
-    if args.chunk_ms <= 0:
-        print("錯誤：--chunk-ms 必須為正數", file=sys.stderr)
-        return 2
     try:
-        config = PipelineConfig(
-            vad=VadConfig(
-                threshold=args.threshold,
-                min_speech_ms=args.min_speech_ms,
-                min_silence_ms=args.min_silence_ms,
-                speech_pad_ms=args.speech_pad_ms,
-            ),
-            pre_roll_ms=args.pre_roll_ms,
-        )
+        config = pipeline_config_from_args(args)
         audio = load_wav(args.wav)
         vad_model = SileroVadModel(num_threads=args.threads)
         asr = load_asr(args.model, num_threads=args.threads)
@@ -120,7 +91,7 @@ def main() -> int:
         "duration_s": round(duration, 3),
         "settings": {
             "asr": asr.name,
-            "vad": "silero-vad-v6.2.3",
+            "vad": VAD_MODEL_NAME,
             "vad_config": asdict(config.vad),
             "pre_roll_ms": config.pre_roll_ms,
             "chunk_ms": args.chunk_ms,
