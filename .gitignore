@@ -1,0 +1,31 @@
+# 模型與資料不進版控（只保留 .gitkeep）
+models/*
+!models/.gitkeep
+data/*
+!data/.gitkeep
+
+# 模型 / 音訊檔，防止誤放到其他目錄
+*.onnx
+*.mlmodel
+*.mlpackage/
+*.mlmodelc/
+*.pt
+*.bin
+*.wav
+*.flac
+!tests/fixtures/*.wav
+
+# 評測輸出
+eval/results/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# macOS
+.DS_Store

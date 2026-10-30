@@ -1,0 +1,28 @@
+[project]
+name = "ondevice-zh-asr"
+version = "0.1.0"
+description = "Apple 設備上的離線、低延遲端側中文串流語音辨識全鏈路"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "mypy>=1.10",
+    "ruff>=0.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+# scripts/ 有 .py 檔後加回來
+files = ["src", "eval", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
