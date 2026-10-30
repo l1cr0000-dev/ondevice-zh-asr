@@ -30,7 +30,7 @@ class SileroVadModel:
     frame_size = FRAME_SIZE
 
     def __init__(self, model_path: str | Path = DEFAULT_MODEL_PATH, num_threads: int = 1) -> None:
-        model_path = Path(model_path)
+        model_path = self.model_path = Path(model_path)
         if not model_path.is_file():
             raise FileNotFoundError(
                 f"找不到 VAD 模型：{model_path}。請先執行 bash scripts/download_models.sh"

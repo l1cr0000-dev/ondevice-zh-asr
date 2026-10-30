@@ -8,6 +8,7 @@ dependencies = [
     "jiwer>=4.0.0",
     "numpy>=2.4.6",
     "onnxruntime>=1.31.1",
+    "opencc>=1.4.2",
     "psutil>=7.2.2",
     "sherpa-onnx>=2.0.1",
     "sounddevice>=0.5.6",

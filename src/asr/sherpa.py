@@ -92,7 +92,7 @@ class SherpaTransducerAsr(StreamingAsr):
     ) -> None:
         self.files = files
         self.config = config or SherpaTransducerConfig()
-        paths = self.files.paths(models_dir)
+        paths = self._paths = self.files.paths(models_dir)
         missing = [str(p) for p in paths.values() if not p.is_file()]
         if missing:
             raise FileNotFoundError(
@@ -118,6 +118,9 @@ class SherpaTransducerAsr(StreamingAsr):
             f"sherpa-onnx/{self.files.model_dir}/{self.files.encoder}"
             f" threads={self.config.num_threads} {self.config.decoding_method}"
         )
+
+    def model_files(self) -> list[Path]:
+        return list(self._paths.values())
 
     def create_stream(self) -> SherpaTransducerStream:
         return SherpaTransducerStream(self._recognizer, self.config.tail_padding_s)

@@ -25,11 +25,19 @@ from src.asr import SAMPLE_RATE, AsrStream, StreamingAsr
 from src.vad import FrameClassifier, StreamingVad, VadConfig, VadEvent
 
 
+def _default_vad() -> VadConfig:
+    # AISHELL-1 test 200 句掃描（docs/progress.md）：min_silence_ms 100 → 500，X-ASR CER −1.8 個百分點、
+    # 每條平均切段數 1.74 → 1.19；500 → 800 無顯著差異，但每句最終結果要多等 300 ms。
+    # 其餘參數維持上游 Silero 預設值。VAD 模組本身的預設值不變。
+    return VadConfig(min_silence_ms=500)
+
+
 @dataclass(frozen=True)
 class PipelineConfig:
-    vad: VadConfig = field(default_factory=VadConfig)
+    vad: VadConfig = field(default_factory=_default_vad)
     # 送入 ASR 的音訊比 VAD 起點（已含 speech_pad_ms）再往前多取的長度。
-    # 100 ms 取自 7 句的小規模對比（docs/progress.md），正式值待評測集上以 CER 決定。
+    # AISHELL-1 掃描：X-ASR 0 → 100 ms CER −0.8 個百分點，100 / 200 / 300 ms 無顯著差異；
+    # 更長的 pre-roll 讓更多句子的首字要多等一個 480 ms chunk（P90 不穩），故取 100 ms。
     pre_roll_ms: int = 100
 
     def __post_init__(self) -> None:

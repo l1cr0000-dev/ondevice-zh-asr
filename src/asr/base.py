@@ -19,6 +19,7 @@
 """
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
@@ -77,3 +78,7 @@ class StreamingAsr(ABC):
 
     @abstractmethod
     def create_stream(self) -> AsrStream: ...
+
+    def model_files(self) -> list[Path]:
+        """推論所需的全部模型檔（含 tokens / 詞表），評測用來計算模型大小。"""
+        return []

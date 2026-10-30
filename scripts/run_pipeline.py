@@ -28,7 +28,7 @@ from src.pipeline import PipelineConfig, Utterance, transcribe
 from src.vad import SileroVadModel, VadConfig, load_wav
 
 DEFAULT_WAV = REPO_ROOT / "tests" / "fixtures" / "vad_two_utterances.wav"
-_DEFAULT_VAD = VadConfig()
+_DEFAULT_VAD = PipelineConfig().vad
 
 
 def parse_args() -> argparse.Namespace:
