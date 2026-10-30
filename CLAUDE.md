@@ -86,9 +86,9 @@ uv run scripts/check_env.py  # 環境檢查（套件版本、ORT providers、麥
 uv run pytest           # 跑測試
 uv run mypy             # 型別檢查
 uv run ruff check .     # lint
+uv run scripts/prepare_eval_data.py  # 下載並抽樣評測集（AISHELL-1 test 200 句）到 data/
+uv run eval/run_eval.py      # 全鏈路評測；多值參數做掃描，見 docs/eval.md
 ```
-
-評測腳本完成後補在這裡。
 
 ## 驗證紀律
 

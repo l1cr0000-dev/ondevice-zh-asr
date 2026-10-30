@@ -34,6 +34,8 @@ uv run scripts/demo_vad.py [input.wav]    # VAD：印出語音段時間（--stre
 uv run scripts/demo_asr.py [input.wav]    # 串流 ASR：模擬即時逐 chunk 送入，印出 partial / 最終結果
                                           # --model x-asr-480ms-int8（預設）| zipformer-zh-14m
 uv run scripts/run_pipeline.py [input.wav] -o out.json  # VAD + ASR：每句文字與時間戳（JSON）
+uv run scripts/prepare_eval_data.py       # 下載並抽樣評測集：AISHELL-1 test 200 句（固定 seed，含 SHA-256 校驗）
+uv run eval/run_eval.py                   # 全鏈路評測：CER / RTF / 首字延遲 / 峰值記憶體 / 模型大小 / 切段數
 ```
 
 `check_env.py` 最後一行印出 `OK` 就代表環境可用；只要有任何一項失敗，它會以非零狀態碼結束。預期看到的 ONNX Runtime providers 有 `CoreMLExecutionProvider` 和 `CPUExecutionProvider`。
@@ -44,20 +46,35 @@ uv run scripts/run_pipeline.py [input.wav] -o out.json  # VAD + ASR：每句文�
 # TODO：以下命令尚未實作
 uv run scripts/transcribe.py input.wav    # 辨識單一 wav
 uv run scripts/mic_demo.py                # 麥克風即時辨識
-uv run scripts/run_eval.py                # 在評測集上產生指標
 ```
 
 ## 指標
 
-<!-- TODO: 由 scripts/run_eval.py 產生後填入 -->
+評測集：AISHELL-1 test 隨機 200 句（seed 20261030，17.2 分鐘）　|　Apple M5 / macOS 27.0.1　|　commit `f576d57`
+CPU、單執行緒、10 ms chunk 模擬即時；VAD 為 Silero v6.2.3（threshold 0.5、min_speech 250 ms、pad 30 ms）。
 
-評測集：AISHELL-1 test　|　機型：TBD　|　commit：TBD
+**預設設定**（min_silence 500 ms、pre-roll 100 ms）
 
-| 設定 | CER (%) | RTF | 首字延遲 P50 / P90 (ms) | 峰值記憶體 (MB) | 模型大小 (MB) |
-|---|---|---|---|---|---|
-| 基準（FP32, CPU, 1 執行緒） | – | – | – / – | – | – |
+| 模型 | CER (%) | RTF | 首字延遲 mean / P90 (ms) | 尾字延遲 mean (ms)* | 每條切段數 | 峰值記憶體 (MB) | 模型大小 (MB) |
+|---|---|---|---|---|---|---|---|
+| **X-ASR 480 ms**（INT8，預設） | **5.07** | 0.036 | 990 / 1029 | 449 | 1.19 | 533 | 163.6 |
+| zipformer-zh-14M（FP32） | 15.27 | 0.015 | 679 / 956 | 411 | 1.19 | 247 | 55.3 |
 
-指標定義見 [CLAUDE.md](CLAUDE.md#核心指標定義)。
+**VAD / pre-roll 掃描**：CER (%)，首字延遲 mean / P90 (ms)
+
+| min_silence | pre-roll | X-ASR CER | X-ASR 首字 | zh-14M CER | zh-14M 首字 | 每條切段數 |
+|---|---|---|---|---|---|---|
+| 100 | 100 | 6.90 | 981 / 1029 | 17.91 | 674 / 956 | 1.74 |
+| 300 | 100 | 5.47 | 992 / 1029 | 17.01 | 678 / 956 | 1.42 |
+| **500** | **100** | **5.07** | **990 / 1029** | 15.27 | 679 / 956 | 1.19 |
+| 800 | 100 | 4.83 | 994 / 1029 | 15.31 | 679 / 958 | 1.07 |
+| 500 | 0 | 5.87 | 1046 / 1129 | 19.14 | 830 / 1372 | 1.19 |
+| 500 | 200 | 5.04 | 953 / 976 | 14.80 | 656 / 860 | 1.19 |
+| 500 | 300 | 5.00 | 907 / 1305 | 13.47 | 664 / 760 | 1.19 |
+
+完整 4 × 4 掃描、成對 bootstrap 信賴區間與取捨分析見 [docs/progress.md](docs/progress.md)；指標定義與文字正規化規則見 [docs/eval.md](docs/eval.md)。
+
+\* AISHELL 句尾靜音短（中位數約 410 ms），min_silence 500 ms 以上時尾字延遲被音訊結束截斷，即時輸入時約為 min_silence + 40 ms。
 
 ## 專案結構
 
@@ -80,8 +97,9 @@ models/ data/  模型與資料（不進版控）
 - [x] 串流 ASR 模組
 - [x] pipeline：wav 輸入（VAD + 串流 ASR，每句時間戳）
 - [ ] pipeline：麥克風輸入
-- [ ] 評測：CER、RTF、首字延遲、峰值記憶體、模型大小
-- [ ] 基準指標寫入 README
+- [x] 評測：CER、RTF、首字延遲、峰值記憶體、模型大小、VAD 切段數
+- [x] 基準指標寫入 README
+- [x] VAD `min_silence_ms` / pre-roll 參數掃描
 
 **第二階段：量化與 Core ML**
 - [ ] INT8 / FP16 量化與精度對比
