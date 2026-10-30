@@ -165,7 +165,7 @@ CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句；VAD 為 Silero v6
 
 - **首字延遲約 1 秒**，幾乎全是 X-ASR 480 ms chunk 的演算法延遲（計算每個 chunk 約 13 ms），換 Core ML / ANE 無法改善，要換更小 chunk 的模型。
 - **單一靜音閾值無法同時切對句中停頓與句間停頓**：min_silence 500 ms 時仍有 16% 的單句音訊被切成多段，而自然口語的句間停頓可短至 290 ms、會被合併。
-- **記憶體偏重**：X-ASR 載入後 RSS 比載入前多約 435 MB，遠大於模型檔 164 MB。關掉 ONNX Runtime 的 CPU memory arena 沒有效果（載入與峰值都在 ±1 MB 內），增加發生在載入階段而非推論；同樣三個檔案直接用 onnxruntime 載入只增加約 245 MB，差額可能在 sherpa-onnx 的載入路徑，尚未確認。見 [docs/progress.md](docs/progress.md)。
+- **記憶體偏重**：X-ASR 載入後 RSS 比載入前多約 435 MB，遠大於模型檔 164 MB。關掉 ONNX Runtime 的 CPU memory arena 沒有效果（載入與峰值都在 ±1 MB 內），增加發生在載入階段而非推論；多出的部分是 sherpa-onnx 2.0.1 內附的 ONNX Runtime 1.28.2 在載入時留下約 180–190 MB 已釋放但未歸還的 malloc 記憶體（碎片），不是權重存了兩份；ORT 1.30.0 起沒有這個現象。見 [docs/progress.md](docs/progress.md)。
 - 目前只跑 CPU；只在 macOS 驗證過。
 
 完整清單與優先順序見 [docs/backlog.md](docs/backlog.md)。

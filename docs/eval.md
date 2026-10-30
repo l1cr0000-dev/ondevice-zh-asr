@@ -21,7 +21,7 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 | 項目 | 正式評測集 | 冒煙子集 |
 |---|---|---|
 | 母體 | AISHELL-1 test set，20 位說話人、7176 句（腳本會檢查句數） | 同左 |
-| 抽樣 | `sorted(random.Random(20261030).sample(sorted(全部 ID), 3000))` | 同左，200 句（與 3000 句是各自獨立的抽樣，不是子集關係） |
+| 抽樣 | `sorted(random.Random(20261030).sample(sorted(全部 ID), 3000))` | 同左，200 句。同一 seed 下 `random.sample` 前段的抽選幾乎相同，200 句中有 199 句也在 3000 句集裡 |
 | 規模 | 3000 句、251.2 分鐘（4.19 小時）、20 位說話人 | 200 句、17.2 分鐘、20 位說話人全部涵蓋 |
 | 指令 | `prepare_eval_data.py`（預設） | `prepare_eval_data.py -n 200` |
 | 輸出 | `data/aishell1_test_3000/` | `data/aishell1_test_200/` |

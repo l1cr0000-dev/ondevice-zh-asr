@@ -337,7 +337,7 @@ RTF：X-ASR 0.034–0.039、zh-14M 0.014–0.015，各設定之間差距在量�
 
 - `prepare_eval_data.py` 預設改為從 AISHELL-1 test 以同一 seed（20261030）隨機抽 3000 句（251.2 分鐘、20 位說話人、約 470 MB）；`-n 200` 仍產生原本的冒煙子集，`-n 7176` 為完整集。
   - 原本打算跑完整 7176 句（約 1.1 GB、約 10 小時音訊），下載速度約每分鐘 100 句；改用 3000 句以縮短下載與評測時間。代價是不能與論文的完整 test set 數字逐位對照。
-  - 3000 句不是 200 句的超集（各自獨立抽樣）。中斷的完整集下載不能拿前段直接用：下載順序依句子 ID 排序，前 2700 句只涵蓋部分說話人。
+  - 同一 seed 下 `random.sample` 前段的抽選幾乎相同，200 句中有 199 句也在 3000 句集裡（事後檢查發現，原先以為是各自獨立的抽樣）。中斷的完整集下載不能拿前段直接用：下載順序依句子 ID 排序，前 2700 句只涵蓋部分說話人。
 - `run_eval.py` 預設改用 3000 句，`--smoke` 用 200 句。結果檔名加上評測集名稱（`<日期>_aishell1_test_3000_<設定>.json`），不同集的結果不再互相覆寫。
 - CER 新增 95% 百分位 bootstrap 信賴區間（10000 次、seed 0），兩種重抽單位：句子、說話人（cluster bootstrap）。定義見 [eval.md](eval.md)。
 - `prepare_eval_data.py` 修正：連線中斷造成的截斷回應（`http.client.IncompleteRead`）不是 `OSError`，原本不會重試，下載 7176 句時在第 2286 句中斷。現在一併重試（最多 5 次）。
@@ -384,10 +384,34 @@ zh-14M（30 句）：default 與 no-arena 都是載入後 190、peak 193 MB（�
 
 1. **arena 不是原因。** 關掉 CPU memory arena 後載入與峰值的變化都在 ±1 MB 內（1000 句時 peak 491 → 482，約 9 MB），因為 435 MB 的增加幾乎全部發生在**載入階段**，推論期間只再增加約 10–20 MB。arena 只影響推論時的暫存張量配置。
 2. 關 prepacking 只少 7 MB；關圖最佳化反而多 144 MB（未融合的節點各自保留中間張量與權重格式）。
-3. **經 sherpa-onnx 載入比直接用 onnxruntime 多約 190 MB**（435 vs 245）。兩邊的 ORT 函式庫不同（sherpa-onnx 自帶 `libonnxruntime.dylib`，Python 套件是 onnxruntime 1.31.1），差額來源未確認。下一步用 sherpa-onnx C API 或讀其載入程式碼確認（backlog B11）。
+3. **經 sherpa-onnx 載入比直接用 onnxruntime 多約 190 MB**（435 vs 245）。兩邊的 ORT 函式庫不同（sherpa-onnx 自帶 `libonnxruntime.dylib`，Python 套件是 onnxruntime 1.31.1），差額來源見下一段的追查。
 4. **評測的峰值 RSS 隨句數增加**：X-ASR 200 句 531 → 3000 句 618 MB、zh-14M 252 → 333 MB；但上面單獨解碼 100 → 1000 句只多 3 MB，所以增加的部分在評測 / pipeline 端（例如逐句結果累積或 partial 歷程），原因未查。在修正之前，不同評測集的峰值 RSS 不能直接比較（README 已註明）。
 5. 決定：不改 `src/asr` 的 session 設定（沒有可量到的收益）。
 
 ### 待辦
 
-見 [backlog.md](backlog.md)：B11（sherpa-onnx 載入多出的 190 MB、評測端 RSS 增長）、B13（替換 fixture 後才能公開 repo）、B6a（不與訓練資料重疊的評測集）。VAD / pre-roll 掃描之後要在 3000 句集上重做。
+見 [backlog.md](backlog.md)：B11（ORT 1.28 的載入碎片、評測端 RSS 增長）、B13（替換 fixture 後才能公開 repo）、B6a（不與訓練資料重疊的評測集）。VAD / pre-roll 掃描之後要在 3000 句集上重做。
+
+### 追查：sherpa-onnx 載入多出的約 190 MB
+
+問題：經 sherpa-onnx 載入 X-ASR 比直接用 onnxruntime 載入多約 190 MB RSS，是不是權重存了兩份？
+
+方法：載入完成後在同一程序內執行 `vmmap --summary <pid>`，比較存活配置量（malloc zone 的 BYTES ALLOCATED）、已釋放未歸還（FRAG SIZE）與 physical footprint。直接載入用 `uv run --no-project --with onnxruntime==<版本>` 的臨時環境，不動專案依賴。
+
+| 載入方式 | ORT 版本 | 存活配置 (MB) | 碎片 (MB) | 碎片比例 | physical footprint (MB) |
+|---|---|---|---|---|---|
+| sherpa-onnx 2.0.1 | 1.28.2（內附） | 219.0 | 182.5 | 46% | 259（載入時峰值 415） |
+| onnxruntime | 1.28.0 | 222.1 | 191.7 | 47% | 443 |
+| onnxruntime | 1.29.0 | 222.5 | 187.7 | 46% | 440 |
+| onnxruntime | 1.30.0 | 222.2 | 33.7 | 14% | 286 |
+| onnxruntime | 1.31.1（專案依賴） | 205.5 | 25.8–35.4 | 12–15% | 261–270 |
+
+結論：
+
+1. **沒有重複的權重。** 各版本的存活配置量都在 205–222 MB，比三個檔案合計（161 MB）多約 45–60 MB（這部分的組成未拆解）；sherpa-onnx 沒有比直接載入多存一份。
+2. **多出來的是 ORT 1.28–1.29 載入時的暫存配置**：載入過程配置、用完釋放，但 malloc 沒有把這些頁面還給系統，仍計入 RSS。這和 sherpa-onnx 無關，同版本的 onnxruntime 直接載入也一樣；ORT 1.30.0 起降到約 34 MB。
+3. 先前在 backlog 寫的推測「sherpa-onnx 先把檔案讀進記憶體再建 session」是錯的：讀 sherpa-onnx 2.0.1 原始碼（`csrc/online-zipformer2-transducer-model.cc`），桌面版是以檔案路徑建立 `Ort::Session`；先讀進緩衝的路徑只用於 Android / HarmonyOS 的 asset manager。
+4. 這些碎片是同一程序之後可以重複使用的記憶體，所以推論期間 RSS 不會再大幅增加（解碼 1000 句只多 3 MB）。但評測報的 peak RSS（`ru_maxrss`）包含它。iOS 的 jetsam 依據的是 physical footprint；sherpa-onnx 這一行的 footprint（259 MB）比 RSS 低，但載入時的峰值仍到 415 MB。
+5. sherpa-onnx 2.0.1 是 PyPI 最新版，目前無法只靠升版解決。可行做法是等上游升級 ORT，或自行以 ORT ≥ 1.30 編譯 sherpa-onnx（backlog B11）。第三階段改用 Core ML 時這個問題不存在，但要重新量。
+
+磁碟上的評測資料（同一天檢查）：中斷的完整集下載 `data/aishell1_test_full/` 有 2936 個檔案，其中 1249 個以 hardlink 與 3000 句集共用（不佔額外空間），1687 個（約 260 MB）只在完整集裡、目前沒有用到。
