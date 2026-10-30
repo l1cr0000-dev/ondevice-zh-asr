@@ -8,7 +8,7 @@
 
 | 項目 | 授權 | 訓練資料 | 含 AISHELL-1 train | 含 AISHELL-1 test |
 |---|---|---|---|---|
-| X-ASR-zh-en（480 ms 串流，INT8） | Apache-2.0 | 約 100 萬小時「開源及收集」語音，資料集清單未公開 | **未知** | **未知** |
+| X-ASR-zh-en（480 / 160 ms 串流，INT8） | Apache-2.0 | 約 100 萬小時「開源及收集」語音，資料集清單未公開 | **未知** | **未知** |
 | zipformer-zh-14M-2023-02-23 | Apache-2.0 | WenetSpeech（文件明寫「只用 WenetSpeech」，子集與時數未寫） | 否（依文件） | 否（依文件） |
 | Silero VAD v6.2.3 | MIT | 不在本次調查範圍 | – | – |
 | 評測資料 AISHELL-1 test | Apache-2.0 | – | – | – |
@@ -16,7 +16,7 @@
 ## X-ASR-zh-en
 
 本專案使用的檔案：sherpa-onnx release `asr-models` 中的
-`sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05.tar.bz2`（SHA-256 `14919f03…`，見 `scripts/download_models.sh`）。壓縮檔內的 README 只有一句「Files in this directory are from https://github.com/Gilgamesh-J/X-ASR/tree/main」，**沒有附 LICENSE 檔**，也沒有訓練資料說明。
+`sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05.tar.bz2`（SHA-256 `14919f03…`）與 2026-10-31 加入的 `sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05.tar.bz2`（SHA-256 `bdf2c0f2…`），見 `scripts/download_models.sh`。兩者是同一系列、只有 chunk 大小不同，以下來源、訓練資料與授權同時適用。參數量：README 比較表列 X-ASR-zh-en（offline）0.16B。壓縮檔內的 README 只有一句「Files in this directory are from https://github.com/Gilgamesh-J/X-ASR/tree/main」，**沒有附 LICENSE 檔**，也沒有訓練資料說明。
 
 ### 來源
 

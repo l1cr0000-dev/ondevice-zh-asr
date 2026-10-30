@@ -36,6 +36,7 @@ DEFAULT_MANIFEST = REPO_ROOT / "data" / "aishell1_test_3000" / "manifest.jsonl"
 SMOKE_MANIFEST = REPO_ROOT / "data" / "aishell1_test_200" / "manifest.jsonl"
 BOOTSTRAP_RESAMPLES = 10000
 RESULTS_DIR = REPO_ROOT / "eval" / "results"
+DEFAULT_LEAD_SILENCE_MS = 1000
 
 
 @dataclass(frozen=True)
@@ -52,12 +53,14 @@ class RunConfig:
     vad_min_silence_ms: int
     vad_speech_pad_ms: int
     warmup: int
+    lead_silence_ms: int = DEFAULT_LEAD_SILENCE_MS  # 每條音訊前補的數位靜音（端到端首字延遲的起點）
 
     @property
     def name(self) -> str:
+        lead = f"_lead{self.lead_silence_ms}" if self.lead_silence_ms else ""
         return (
             f"{self.model}_sil{self.vad_min_silence_ms}_pre{self.pre_roll_ms}"
-            f"_chunk{self.chunk_ms}_t{self.threads}"
+            f"_chunk{self.chunk_ms}_t{self.threads}{lead}"
         )
 
 
@@ -79,6 +82,8 @@ def _peak_rss_mb() -> float:
 
 
 def worker(cfg: RunConfig) -> dict[str, Any]:
+    import numpy as np
+
     from src.asr import SAMPLE_RATE, load_asr
     from src.pipeline import PipelineConfig, transcribe
     from src.vad import SileroVadModel, VadConfig, load_wav
@@ -103,8 +108,12 @@ def worker(cfg: RunConfig) -> dict[str, Any]:
     rss_loaded = _rss_mb()
     files = [vad_model.model_path, *asr.model_files()]
 
+    lead = cfg.lead_silence_ms * SAMPLE_RATE // 1000
+    lead_s = lead / SAMPLE_RATE
+
     def run(path: Path) -> tuple[float, float, list[Any]]:
-        audio = load_wav(path)  # 讀檔不計時
+        audio = load_wav(path)  # 讀檔與補靜音不計時
+        audio = np.concatenate([np.zeros(lead, dtype=audio.dtype), audio])
         start = time.perf_counter()
         utts = transcribe(audio, vad_model, asr, pipe_cfg, chunk_ms=cfg.chunk_ms)
         return len(audio) / SAMPLE_RATE, time.perf_counter() - start, utts
@@ -120,15 +129,20 @@ def worker(cfg: RunConfig) -> dict[str, Any]:
                 "id": row["id"],
                 "ref": row["text"],
                 "hyp": " ".join(u.text for u in utts if u.text),
-                "duration_s": duration,
+                "duration_s": duration - lead_s,  # 原始音訊長度
+                "processed_s": duration,  # 實際送入 pipeline 的長度（含補靜音），RTF 的分母
                 "compute_s": compute,
+                # 位置與時刻都換回原始音訊的時間軸（補靜音結束 = 0）
                 "segments": [
                     {
                         "text": u.text,
-                        "speech_start_s": u.speech_start_s,
-                        "speech_end_s": u.speech_end_s,
+                        "speech_start_s": u.speech_start_s - lead_s,
+                        "speech_end_s": None if u.speech_end_s is None else u.speech_end_s - lead_s,
                         "vad_start_delay_s": u.start_emitted_s - u.speech_start_s,
                         "first_token_latency_s": u.first_token_latency_s,
+                        "e2e_first_token_latency_s": (
+                            None if u.first_token_s is None else u.first_token_s - lead_s
+                        ),
                         "tail_latency_s": u.tail_latency_s,
                     }
                     for u in utts
@@ -229,9 +243,11 @@ def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> d
     utts = raw["utterances"]
     cer = corpus_cer([u["ref"] for u in utts], [u["hyp"] for u in utts])
     total_audio = sum(u["duration_s"] for u in utts)
+    total_processed = sum(u.get("processed_s", u["duration_s"]) for u in utts)
     total_compute = sum(u["compute_s"] for u in utts)
 
     first_token_ms: list[float] = []  # 每條音訊一個值：第一個有字的句段
+    e2e_first_token_ms: list[float] = []  # 同一句段，起點改為補靜音結束
     tail_ms: list[float] = []  # 每條音訊一個值：最後一個句段
     vad_delay_ms: list[float] = []
     seg_counts: list[int] = []
@@ -242,6 +258,8 @@ def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> d
         if first is not None and first["first_token_latency_s"] is not None:
             first_token_ms.append(first["first_token_latency_s"] * 1000)
             vad_delay_ms.append(first["vad_start_delay_s"] * 1000)
+            if first.get("e2e_first_token_latency_s") is not None:
+                e2e_first_token_ms.append(first["e2e_first_token_latency_s"] * 1000)
         if segs and segs[-1]["tail_latency_s"] is not None:
             tail_ms.append(segs[-1]["tail_latency_s"] * 1000)
         u["ref_norm"] = normalize(u["ref"])
@@ -270,8 +288,9 @@ def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> d
             "cer": cer.cer,
             "cer_ci95": cer_confidence(utts),
             "cer_counts": asdict(cer),
-            "rtf": total_compute / total_audio,
+            "rtf": total_compute / total_processed,
             "first_token_latency_ms": summarize(first_token_ms),
+            "e2e_first_token_latency_ms": summarize(e2e_first_token_ms),
             "no_text_utterances": len(utts) - len(first_token_ms),
             "vad_start_delay_ms": summarize(vad_delay_ms),
             "tail_latency_ms": summarize(tail_ms),
@@ -318,6 +337,7 @@ def _ci(ci: list[float] | None) -> str:
 
 TABLE_HEADER = (
     "| model | min_sil | pre_roll | CER % | CER 95% CI (utt) | RTF | first-token mean / P90 (ms) "
+    "| e2e first-token mean / P90 (ms) "
     "| tail mean (ms) | seg/utt (max) | peak RSS (MB) | model (MB) |"
 )
 
@@ -325,10 +345,12 @@ TABLE_HEADER = (
 def table_row(res: dict[str, Any]) -> str:
     c, m = res["config"], res["metrics"]
     ft, seg = m["first_token_latency_ms"], m["segments_per_utterance"]
+    e2e = m.get("e2e_first_token_latency_ms") or {"mean": None, "p90": None}
     return (
         f"| {c['model']} | {c['vad_min_silence_ms']} | {c['pre_roll_ms']} "
         f"| {m['cer'] * 100:.2f} | {_ci(m['cer_ci95']['utterance'])} | {m['rtf']:.4f} "
         f"| {_fmt(ft['mean'])} / {_fmt(ft['p90'])} "
+        f"| {_fmt(e2e['mean'])} / {_fmt(e2e['p90'])} "
         f"| {_fmt(m['tail_latency_ms']['mean'])} | {seg['mean']:.2f} ({seg['max']}) "
         f"| {m['memory_mb']['peak_rss']:.0f} | {m['model_size_mb']:.1f} |"
     )
@@ -339,6 +361,7 @@ def print_detail(res: dict[str, Any]) -> None:
 
     c, m, env = res["config"], res["metrics"], res["environment"]
     ft, tail, cc = m["first_token_latency_ms"], m["tail_latency_ms"], m["cer_counts"]
+    e2e = m["e2e_first_token_latency_ms"]
     seg, ci = m["segments_per_utterance"], m["cer_ci95"]
     vad = (
         f"threshold={c['vad_threshold']} min_speech={c['vad_min_speech_ms']}ms"
@@ -351,6 +374,10 @@ def print_detail(res: dict[str, Any]) -> None:
     ftl = (
         f"mean {_fmt(ft['mean'])}  P50 {_fmt(ft['p50'])}  P90 {_fmt(ft['p90'])}"
         f"  P99 {_fmt(ft['p99'])}  (n={ft['n']}，無輸出 {m['no_text_utterances']} 句)"
+    )
+    e2e_s = (
+        f"mean {_fmt(e2e['mean'])}  P50 {_fmt(e2e['p50'])}  P90 {_fmt(e2e['p90'])}"
+        f"  P99 {_fmt(e2e['p99'])}（起點：前補 {c['lead_silence_ms']} ms 靜音的結束點）"
     )
     ci_s = (
         f"以句重抽 {_ci(ci['utterance'])}  以說話人重抽 {_ci(ci['speaker'])}"
@@ -366,6 +393,7 @@ def print_detail(res: dict[str, Any]) -> None:
         ("ASR", c["asr_name"]),
         ("VAD", vad),
         ("pre-roll / chunk", f"{c['pre_roll_ms']} ms / {c['chunk_ms']} ms，暖機 {c['warmup']} 句"),
+        ("前補靜音", f"{c['lead_silence_ms']} ms"),
         (
             "環境",
             f"{env['chip']} ({env['machine']}) macOS {env['macos']} commit {env['commit']}{dirty}",
@@ -374,7 +402,8 @@ def print_detail(res: dict[str, Any]) -> None:
         ("CER", f"{m['cer'] * 100:.2f}%  ({counts})"),
         ("  95% 信賴區間", ci_s),
         ("RTF", f"{m['rtf']:.4f}"),
-        ("首字延遲 (ms)", ftl),
+        ("端到端首字延遲 (ms)", e2e_s),
+        ("首字延遲 VAD 起點 (ms)", ftl),
         ("  其中 VAD 觸發 (ms)", f"mean {_fmt(m['vad_start_delay_ms']['mean'])}"),
         ("尾字延遲 (ms)", f"mean {_fmt(tail['mean'])}  P90 {_fmt(tail['p90'])}"),
         ("每條切段數", f"mean {seg['mean']:.2f}  max {seg['max']}  分佈 {seg['histogram']}"),
@@ -409,6 +438,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--limit", type=positive_int, help="只評測前 N 句（除錯用，結果名稱會加上 _limN）"
+    )
+    p.add_argument(
+        "--lead-silence-ms",
+        type=non_negative_int,
+        default=DEFAULT_LEAD_SILENCE_MS,
+        help="每條音訊前補的靜音長度；端到端首字延遲以補靜音的結束點為起點（0 = 不補，結果名稱不加 _lead）",
     )
     p.add_argument("--tag", default="", help="掃描總表檔名的標籤")
     p.add_argument("--results-dir", type=Path, default=RESULTS_DIR, help="結果輸出目錄")
@@ -458,6 +493,7 @@ def main() -> int:
             vad_min_silence_ms=sil,
             vad_speech_pad_ms=args.speech_pad_ms,
             warmup=args.warmup,
+            lead_silence_ms=args.lead_silence_ms,
         )
         for model, threads, chunk, sil, pre in itertools.product(
             args.model, args.threads, args.chunk_ms, args.min_silence_ms, args.pre_roll_ms

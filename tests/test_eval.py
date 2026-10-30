@@ -145,6 +145,7 @@ def _seg(text: str, ftl: float | None, tail: float | None) -> dict[str, object]:
         "speech_end_s": 1.0,
         "vad_start_delay_s": 0.3,
         "first_token_latency_s": ftl,
+        "e2e_first_token_latency_s": None if ftl is None else ftl + 0.2,
         "tail_latency_s": tail,
     }
 
@@ -172,6 +173,7 @@ def test_summarize_run_latency_uses_first_segment_with_text() -> None:
     assert m["rtf"] == pytest.approx(0.05)
     assert m["first_token_latency_ms"]["n"] == 1
     assert m["first_token_latency_ms"]["mean"] == pytest.approx(500)
+    assert m["e2e_first_token_latency_ms"]["mean"] == pytest.approx(700)
     assert m["tail_latency_ms"]["mean"] == pytest.approx(200)
     assert m["no_text_utterances"] == 1
     assert m["segments_per_utterance"] == {"mean": 1.0, "max": 2, "histogram": {"0": 1, "2": 1}}
@@ -204,6 +206,9 @@ def test_run_eval_end_to_end(tmp_path: Path) -> None:
     assert m["cer"] <= 0.15
     assert m["segments_per_utterance"]["max"] == 2  # fixture 是兩句
     assert 0 < m["first_token_latency_ms"]["mean"] < 2000
+    assert res["config"]["lead_silence_ms"] == 1000 and result_file.stem.endswith("_lead1000")
+    # 端到端起點早於 VAD 起點（fixture 開頭有靜音），所以端到端延遲較大
+    assert m["e2e_first_token_latency_ms"]["mean"] > m["first_token_latency_ms"]["mean"]
     assert m["memory_mb"]["peak_rss"] > m["memory_mb"]["baseline_rss"] > 0
     assert m["model_size_mb"] > 1
     assert set(res["config"]) >= {"model", "pre_roll_ms", "chunk_ms", "vad_min_silence_ms"}

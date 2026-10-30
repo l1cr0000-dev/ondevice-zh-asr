@@ -27,11 +27,16 @@
 #     授權：Apache-2.0（repo LICENSE 與 Hugging Face 模型卡；壓縮檔內沒有附 LICENSE）
 #     檔案：models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05/
 #           encoder / joiner 為 INT8、decoder 為 FP32（合計約 161 MB），另含 tokens.txt、bpe.model、test_wavs/
+#
+#   X-ASR 串流 Zipformer transducer（中英，160 ms chunk，官方 INT8 版）
+#     版本：sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05（release tag asr-models）
+#     來源、訓練資料、授權：同上 480 ms 版（同一個模型系列，只有 chunk 大小不同）
+#     檔案：models/sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05/
 
 set -euo pipefail
 
 usage() {
-    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 FORCE=0
@@ -114,5 +119,11 @@ fetch_archive \
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${X_ASR_480MS}.tar.bz2" \
     "$X_ASR_480MS" \
     "14919f03b74d9001fc8f2689c2ab1ea42c436db269e8c809144492f41612bfff"
+
+X_ASR_160MS="sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05"
+fetch_archive \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${X_ASR_160MS}.tar.bz2" \
+    "$X_ASR_160MS" \
+    "bdf2c0f2474d34bf479871b0f298c74a6f6bf15f24a492dc5401aa3041811915"
 
 echo "全部模型就緒：$MODELS_DIR"

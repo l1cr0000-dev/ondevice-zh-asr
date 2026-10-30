@@ -49,6 +49,13 @@ ZIPFORMER_ZH_14M = TransducerFiles(
     joiner="joiner-epoch-99-avg-1.onnx",
 )
 
+X_ASR_160MS = TransducerFiles(
+    model_dir="sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05",
+    encoder="encoder.int8.onnx",
+    decoder="decoder.onnx",  # 官方 INT8 版的 decoder 仍為 FP32
+    joiner="joiner.int8.onnx",
+)
+
 X_ASR_480MS = TransducerFiles(
     model_dir="sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05",
     encoder="encoder.int8.onnx",

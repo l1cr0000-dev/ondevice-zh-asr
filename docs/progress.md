@@ -415,3 +415,105 @@ zh-14M（30 句）：default 與 no-arena 都是載入後 190、peak 193 MB（�
 5. sherpa-onnx 2.0.1 是 PyPI 最新版，目前無法只靠升版解決。可行做法是等上游升級 ORT，或自行以 ORT ≥ 1.30 編譯 sherpa-onnx（backlog B11）。第三階段改用 Core ML 時這個問題不存在，但要重新量。
 
 磁碟上的評測資料（同一天檢查）：中斷的完整集下載 `data/aishell1_test_full/` 有 2936 個檔案，其中 1249 個以 hardlink 與 3000 句集共用（不佔額外空間），1687 個（約 260 MB）只在完整集裡、目前沒有用到。
+
+---
+
+## 2026-10-31　端到端首字延遲（B5 部分）、X-ASR 160 ms 對比（B1）
+
+環境：Apple M5（Mac17,3）/ macOS 27.0.1 / onnxruntime 1.31.1 / sherpa-onnx 2.0.1，單執行緒，CPU。
+評測在 commit `e72d97e` + 未提交的程式上執行（結果 JSON 記錄為 `e72d97e (dirty)`），程式即本次提交的內容。
+評測期間同時有其他單執行緒工作在跑（模型下載、200 句掃描）；X-ASR 480 ms 的 RTF 換算成相同分母後與上次一致（見下），沒有看到干擾。
+
+### 端到端首字延遲：不再用 VAD 本身當起點
+
+- `run_eval.py` 新增 `--lead-silence-ms`（預設 1000）：每條音訊前補 1 秒數位靜音再送入 pipeline。
+- 新增 `e2e_first_token_latency_ms` = 第一個非空 partial 的模擬即時時刻 − 補靜音結束點。與 VAD 無關，但含原始音訊開頭未知長度的靜音，**只適合設定間相對比較**。原本以 VAD 起點的首字延遲保留，兩者都報告。定義與限制見 [eval.md](eval.md)。
+- RTF 的分母改為實際送入的音訊長度（含補靜音）。結果 JSON 的位置（`speech_start_s` 等）換回原始音訊時間軸。結果檔名加 `_lead1000`，不覆寫舊結果；`--lead-silence-ms 0` 重現舊設定。
+- 開發時用 `--smoke --limit 20`（約 5 秒 / 模型）先確認能跑通，再跑 200 / 3000 句。
+
+**補靜音前後**（3000 句，sil 500、pre-roll 100）
+
+| 模型 | 補靜音 | CER (%) | RTF | 首字（VAD 起點）mean / P90 (ms) | 端到端首字 mean / P50 / P90 / P99 (ms) | 尾字 mean (ms) |
+|---|---|---|---|---|---|---|
+| X-ASR 480 ms | 0（上次，`f6b11a8`） | 4.15 | 0.0358 | 961 / 1029 | – | 453 |
+| X-ASR 480 ms | 1000 ms | 4.11 | 0.0301 | 972 / 1029 | 1487 / 1533 / 1623 / 2073 | 451 |
+| zh-14M | 0（上次） | 13.49 | 0.0155 | 665 / 958 | – | 417 |
+| zh-14M | 1000 ms | 12.92 | 0.0134 | 666 / 958 | 1179 / 1144 / 1464 / 1844 | 416 |
+
+- CER 小幅變化：1000 ms 不是 VAD frame（32 ms）的整數倍，補靜音讓 VAD frame 相對語音的切點位移。兩個模型都在上次的 95% CI 內。
+- RTF 下降主要來自分母變大：0.0358 × 251.2 / 301.2 ≈ 0.0299，與 0.0301 一致。
+- 端到端減 VAD 起點約 515 ms（X-ASR）/ 513 ms（zh-14M），兩個模型幾乎相同，符合「差值 = 原始音訊開頭靜音 + VAD 起點位置，與模型無關」的預期。
+
+### X-ASR 160 ms INT8（B1）
+
+- 查過的候選（sherpa-onnx release `asr-models` 中的中文串流模型）：X-ASR 160 / 960 ms INT8；`streaming-zipformer-zh-int8-2025-06-30`（multi-zh-hans large，約 160M）與 `multi-zh-hans-int8-2023-12-13`，兩者依 icefall `egs/multi_zh-hans/ASR/README.md` 訓練資料含 AISHELL-1（170 h），在 AISHELL-1 test 上是同領域、不能公平比較；`streaming-zipformer-small-ctc-zh-int8-2025-04-01`（需新增 CTC 後端，訓練資料未知）。**只下載 160 ms INT8。**
+- 檔案：`sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05`（release `asr-models`，SHA-256 `bdf2c0f2…`，為 GitHub release 記錄的 digest；同一來源對 480 ms 版的 digest 與先前固定的值一致）。來源、授權、訓練資料與 480 ms 版相同（同一系列），見 [models.md](models.md)。
+- encoder metadata：`decode_chunk_len` 16（160 ms）、`T` 29（右側 context 13 frame）；encoder.int8 148.1 MB，與 480 ms 版大小相同。
+- 參數量：X-ASR README 的比較表列 0.16B（標為 offline 模式；README 說是 offline-streaming 統一模型）。
+- 註冊名稱 `x-asr-160ms-int8`，預設模型不變。
+
+**句尾補零**：整句送入（不經 VAD），與補 3.0 s 的結果逐句比對（200 句 AISHELL + 4 個官方 test_wavs）。
+
+| 補零 (s) | 與 3.0 s 不同的句數 | finalize mean (ms) |
+|---|---|---|
+| 0.64 | 15 / 54（前 50 句） | 40 |
+| 1.0 | 4 / 54 | 62 |
+| 1.6（480 ms 版的值） | 3 / 204 | 97 |
+| **2.0** | 0 / 204 | 121 |
+| 2.4 / 4.0 | 0 / 204 | 146 / 245 |
+
+取 2.0 s。小 chunk 版需要的補零反而比 480 ms 版（1.6 s）長，原因未查；finalize 計算量也較大（每秒音訊要跑 6.25 次 encoder，480 ms 版約 2 次）。
+
+**pre-roll 掃描**（200 句子集）：
+
+| 模型 | pre-roll | CER (%) [95% CI] | 端到端首字 mean / P90 (ms) | 首字（VAD 起點）mean / P90 (ms) |
+|---|---|---|---|---|
+| 160 ms | 0 | 6.20 [4.98, 7.49] | 1404 / 1599 | 890 / 1119 |
+| 160 ms | **100** | 5.54 [4.41, 6.79] | 1364 / 1559 | 850 / 1023 |
+| 160 ms | 200 | 5.40 [4.29, 6.60] | 1365 / 1559 | 851 / 1077 |
+| 160 ms | 300 | 5.60 [4.54, 6.72] | 1361 / 1549 | 847 / 985 |
+| 480 ms | 0 / 100 / 200 / 300 | 5.40 / 5.14 / 4.80 / 4.77 | 1561 / 1515 / 1480 / 1451（mean） | – |
+
+160 ms 的 100 / 200 / 300 差異都在 CI 內，維持 100 ms，與 480 ms 只差模型。
+
+**3000 句對比**（sil 500、pre-roll 100、補靜音 1000 ms）
+
+| 模型 | chunk | CER (%) | 95% CI 以句 | RTF | 端到端首字 mean / P50 / P90 / P99 (ms) | 首字（VAD 起點）mean / P90 | 尾字 mean / P90 (ms) | peak RSS (MB) |
+|---|---|---|---|---|---|---|---|---|
+| X-ASR | 160 ms | 5.05 | [4.76, 5.35] | 0.0670 | 1359 / 1369 / 1559 / 1819 | 845 / 1023 | 523 / 601 | 626 |
+| X-ASR | 480 ms | **4.11** | [3.85, 4.38] | 0.0301 | 1487 / 1533 / 1623 / 2073 | 972 / 1029 | 451 / 528 | 622 |
+| zh-14M | 320 ms | 12.92 | [12.44, 13.41] | 0.0134 | **1179** / 1144 / 1464 / 1844 | 666 / 958 | 416 / 494 | 335 |
+
+取捨圖：[latency_tradeoff.png](latency_tradeoff.png)（`uv run scripts/plot_latency_tradeoff.py` 產生）。
+
+![chunk 大小 vs CER vs 端到端首字延遲](latency_tradeoff.png)
+
+成對比較（同一批 3000 句，160 − 480）：
+
+- **CER +0.94 個百分點，95% 成對 bootstrap CI [0.77, 1.11]**（以句重抽 10000 次、seed 0），顯著變差（相對 +23%）。X-ASR README 自己的 benchmark 上 160 ms 也比 480 ms 差約 0.5–1.2 個百分點，方向一致。
+- **端到端首字延遲逐句差：mean −128 ms、P50 −164 ms、P10 −324 ms、P90 +156 ms**；88% 的句子變快，12% 反而變慢。
+- 尾字延遲 +72 ms（finalize 補零較長、encoder 次數較多）。RTF 2.2 倍。
+
+**延遲拆解：VAD 確認不是瓶頸**（每條第一個有字的句段）
+
+| 模型 | VAD 確認（語音起點 → start 事件）mean | start 事件 → 首字 mean / P10 / P50 / P90 | start 事件後 100 ms 內出字的比例 |
+|---|---|---|---|
+| 160 ms | 291 ms | 554 / 409 / 569 / 729 ms | 0.1% |
+| 480 ms | 291 ms | 681 / 253 / 733 / 743 ms | 0% |
+
+- 上一版 backlog 的推測是「換小 chunk 後 VAD 確認延遲會露出來」，**數據不支持**：VAD 發出 start 事件時，pipeline 已把 pre-roll 起的約 390 ms 音訊（100 + 291 ms）一次送入，160 ms 模型（需 290 ms 特徵）此時已能解碼，但 P10 仍要再等 409 ms 才出第一個字，幾乎沒有句子在 start 事件當下就出字。
+- 也就是說，160 ms 模型的首字是由**模型本身多晚輸出第一個字**決定的，VAD 的 291 ms 被蓋住了。chunk 從 480 縮到 160 ms 只省約 130 ms，遠小於 chunk 差（320 ms）。
+- 模型為何晚出字（transducer 的輸出延遲、需要更多右側音訊、或 AISHELL 的首字起音比 VAD 起點晚）目前無法區分，需要有字級時間對齊的評測集（B4 / B5）。
+- 對 B2（VAD 預先啟動）的影響：在這兩個模型上，提早建立 stream 預期幫助有限，因為首字不是卡在 VAD。做 B2 前要先確認瓶頸。
+
+### 決定
+
+- **預設模型維持 X-ASR 480 ms。** 160 ms 換到平均 128 ms 的首字延遲，代價是 CER 相對 +23%（顯著）、RTF 2.2 倍、尾字 +72 ms，不划算。
+- zh-14M 首字延遲最低（端到端比 X-ASR 480 ms 少約 300 ms），但 CER 高 3 倍，不考慮。
+- 首字延遲要再降，方向從「換更小 chunk」改為先弄清楚模型的輸出延遲（B4 / B5 的對齊資料）。
+
+### 測試
+
+- `tests/test_eval.py`：彙整的端到端首字延遲；端到端測試檢查 `lead_silence_ms`、檔名 `_lead1000`，以及端到端延遲大於 VAD 起點延遲。
+- `tests/test_asr.py`：`x-asr-160ms-int8` 加入真實模型測試（0.wav 1/28、1.wav 0/26）。
+- `uv run pytest` 94 passed、mypy strict、ruff 通過。

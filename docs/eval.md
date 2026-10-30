@@ -12,7 +12,7 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 ```
 
 多個值的參數（`--model`、`--min-silence-ms`、`--pre-roll-ms`、`--chunk-ms`、`--threads`）取笛卡兒積。
-`--limit N` 只跑前 N 句（除錯用）。`--help` 列出全部參數與預設值。
+`--limit N` 只跑前 N 句（除錯用；例如 `--smoke --limit 20` 約 5 秒 / 模型，改程式時先用它確認能跑通）。`--lead-silence-ms` 設定每條音訊前補的靜音（預設 1000，見首字延遲）。`--help` 列出全部參數與預設值。
 正式報告的數字一律用 3000 句評測集；`--smoke` 只用來在改動後快速確認結果沒變（200 句的 CER 信賴區間約 ±1 個百分點，不適合下結論）。
 `--manifest data/aishell1_test_full/manifest.jsonl` 可跑完整 7176 句（需先 `prepare_eval_data.py -n 7176`，約 1.1 GB）。
 
@@ -37,6 +37,7 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 - 每個設定在**獨立子程序**中載入模型、跑完全部句子、量峰值記憶體；父程序只做 CER 與彙整。
 - 每條 wav 用 `src.pipeline.transcribe` 以 `chunk_ms`（預設 10 ms）切塊送入，**模擬即時**：一個 chunk 要等最後一個樣本「到達」（依音訊實際時長）才能送入，送入後的計算時間實際量測並累加，計算比音訊慢時會自然積壓。不真的 sleep。
 - 一條 wav 被 VAD 切成多段時，各段文字以空白連接後當作這條的假設文字（正規化會去掉空白）。
+- 每條 wav 前面先補 `lead_silence_ms`（預設 1000 ms）的數位靜音（全零樣本）再送入，作為端到端首字延遲的起點。結果 JSON 中的位置（`speech_start_s` 等）都換回原始音訊的時間軸（補靜音結束 = 0）。設 `--lead-silence-ms 0` 可重現 2026-10-30 以前的設定。
 - 單執行緒（VAD 與 ASR 的 ONNX Runtime intra-op 都是 1）、CPU。
 
 ## 文字正規化（CER 前）
@@ -68,11 +69,28 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 
 ### RTF
 
-`RTF = Σ 每句處理時間 / Σ 每句音訊時長`。每句處理時間 = `transcribe()` 的牆鐘時間，涵蓋 VAD、ASR 解碼、finalize（含補零）；**不含**讀 wav 與模型載入。正式計時前先跑前 N 句暖機（預設 N = 3，結果 JSON 記錄在 `config.warmup`），暖機結果丟棄、這 N 句之後仍正常計入。
+`RTF = Σ 每句處理時間 / Σ 每句送入的音訊時長`（含前補靜音，`processed_s`）。每句處理時間 = `transcribe()` 的牆鐘時間，涵蓋 VAD、ASR 解碼、finalize（含補零）；**不含**讀 wav 與模型載入。正式計時前先跑前 N 句暖機（預設 N = 3，結果 JSON 記錄在 `config.warmup`），暖機結果丟棄、這 N 句之後仍正常計入。
 
 注意 10 ms chunk 的 Python 呼叫開銷會計入 RTF；chunk 越大 RTF 越低，與延遲需一起看。
 
 ### 首字延遲
+
+報告兩種，終點相同（第一個非空 partial 輸出的模擬即時時刻），起點不同：
+
+| | 端到端首字延遲（`e2e_first_token_latency_ms`，主要） | VAD 起點首字延遲（`first_token_latency_ms`，輔助） |
+|---|---|---|
+| 起點 | 前補靜音的結束點 = 原始音訊第 0 個樣本 | VAD 判定的語音起點（含 `speech_pad_ms`） |
+| 與 VAD 的關係 | 無關：起點由評測框架決定 | 起點由被測系統的一部分決定 |
+| 包含 | 原始音訊開頭的靜音 + VAD 確認延遲 + ASR 等待 chunk + 計算 | ASR 等待 chunk + 計算 + VAD 確認延遲（扣掉 VAD 切點與真實起音的誤差） |
+| 適合 | 比較不同 VAD / pipeline / 模型設定（相對比較） | 拆解延遲來源 |
+
+**端到端首字延遲的限制**：AISHELL 原始音訊開頭本來就有一段長度不一的靜音（未標註），這段時間被算進延遲，所以絕對值**高估**使用者感受到的延遲，不能直接當作「說話後多久出字」。但同一條音訊在所有設定下都一樣，因此適合做設定間的相對比較（差值有意義）。要得到絕對值需要已知語音起點的評測集（backlog B4 / B5）。
+
+**VAD 起點首字延遲的限制**：VAD 切得晚時延遲反而「看起來比較好」，等於用被測系統的一部分當尺；改變 VAD 參數或做 VAD 預先啟動（B2）時，這個數字不能用來比較。
+
+**為何要補靜音**：原始音訊沒有與 VAD 無關的語音起點標註；補靜音後，「靜音結束」是評測框架自己決定、精確已知的時間點，可以當作不依賴 VAD 的起點。注意 1000 ms 不是 VAD frame（32 ms）的整數倍，補靜音會讓 VAD frame 相對語音的切點位移，結果與不補時會有少量差異（20 句小集合上 CER 差 1 個字）。
+
+VAD 起點首字延遲的細節：
 
 - **起點**：VAD 判定的語音起點，即該句段在音訊時間軸上的起點 `Utterance.speech_start_s`。這是 VAD 狀態機判定為語音的第一個 frame 再往前延伸 `speech_pad_ms`（30 ms）的位置，**不是**強制對齊的真實起點，也**不是** VAD 發出「開始」事件的時刻。
 - **終點**：第一個非空 partial 結果輸出的模擬即時時刻（若 partial 一直為空、直到 finalize 才出字，取 finalize 完成時刻）。
@@ -80,6 +98,7 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 - **每條音訊取一個值**：該條第一個有輸出文字的句段。這樣不同 `min_silence_ms` 下樣本數固定為 200，可以直接比較；沒有任何輸出的句子不計入，數量另列 `no_text_utterances`。逐段數值保留在結果 JSON 的 `utterances[].segments`。
 - 報告平均與 P90（另存 P50 / P99），單位 ms。分位數用 numpy 線性內插。
 - `pre_roll_ms` 只改變送入 ASR 的起點，不改變上述起點，因此不同 pre-roll 的首字延遲可直接比較。
+- 端到端首字延遲取**同一個句段**（每條第一個有字的句段），樣本數相同。
 
 ### 尾字延遲（輔助）
 
@@ -117,7 +136,7 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 
 ## 已知限制
 
-- 語音起點用 VAD，不是強制對齊，VAD 本身的起點誤差（約 ±50 ms）會進入首字延遲。
+- VAD 起點首字延遲的起點用 VAD，不是強制對齊，VAD 本身的起點誤差（約 ±50 ms）會進入該數字；端到端首字延遲含原始音訊開頭未知長度的靜音，只適合相對比較（見上）。
 - 延遲是模擬即時，假設音訊準時到達、沒有其他程序搶 CPU；真實麥克風輸入另有音訊驅動的緩衝延遲。
 - 評測集只有 20 位說話人。以句重抽的信賴區間沒有反映說話人之間的差異，換一批說話人時的不確定性見以說話人重抽的區間。
 - 模型訓練資料是否含 AISHELL-1 會影響 CER 的解讀（同領域 / 跨領域 / 資料洩漏），見 [models.md](models.md)。

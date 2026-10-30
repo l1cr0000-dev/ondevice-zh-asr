@@ -64,10 +64,10 @@ sequenceDiagram
     P->>R: 建立 stream，從 起點 − 100 ms（pre-roll）補送緩衝音訊
     A->>R: 持續送入
     Note over R: 第一個 chunk 需 61 frame（約 0.61 s 音訊）才能解碼，<br/>之後每 0.48 s 更新一次；每次計算約 13 ms
-    R->>P: 第一個非空 partial（首字延遲 mean 961 ms）
+    R->>P: 第一個非空 partial（首字延遲 mean 972 ms）
 ```
 
-VAD 確認的 291 ms 被「等第一個 chunk 收滿」蓋住（pre-roll 的音訊會一次補送），因此首字延遲幾乎全是 ASR chunk 的演算法延遲，換更快的推論後端幫助不大。
+VAD 確認的 291 ms 被「等第一個 chunk 收滿」蓋住（pre-roll 的音訊會一次補送），換更快的推論後端幫助不大。換成 160 ms chunk 也只快約 130 ms：VAD 發出 start 事件後，模型平均還要 554 ms 才輸出第一個字，瓶頸在模型多晚出字，不在 VAD（見 [docs/progress.md](docs/progress.md) 2026-10-31）。
 
 ## 快速開始
 
@@ -113,19 +113,26 @@ uv run eval/run_eval.py --smoke           # 改動後快速確認沒有改壞，
 
 ## 基準指標
 
-評測集：AISHELL-1 test 隨機 3000 句（seed 20261030，佔 test set 42%，251.2 分鐘，20 位說話人）　|　Apple M5（Mac17,3）/ macOS 27.0.1　|　commit `982ca41`
-CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句；VAD 為 Silero v6.2.3（threshold 0.5、min_speech 250 ms、min_silence 500 ms、pad 30 ms）、pre-roll 100 ms。
+評測集：AISHELL-1 test 隨機 3000 句（seed 20261030，佔 test set 42%，251.2 分鐘，20 位說話人）　|　Apple M5（Mac17,3）/ macOS 27.0.1　|　commit `e72d97e` + 本次提交的程式
+CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句、每條前補 1 秒靜音；VAD 為 Silero v6.2.3（threshold 0.5、min_speech 250 ms、min_silence 500 ms、pad 30 ms）、pre-roll 100 ms。
 
-| 模型 | 精度 | CER (%) | CER 95% CI（以句 / 以說話人） | RTF | 首字延遲 mean / P50 / P90 / P99 (ms) | 其中 VAD 觸發 (ms) | 尾字延遲 mean (ms)* | 每條切段數 | 峰值 RSS (MB)† | 模型大小 (MB) | 載入 (s) |
+| 模型 | 精度 | CER (%) | CER 95% CI（以句） | RTF§ | 端到端首字延遲 mean / P50 / P90 / P99 (ms)¶ | 首字延遲（VAD 起點）mean / P90 (ms) | 其中 VAD 觸發 (ms) | 尾字延遲 mean (ms)* | 每條切段數 | 峰值 RSS (MB)† | 模型大小 (MB) |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| **X-ASR 480 ms**（預設）‡ | encoder / joiner INT8，decoder FP32 | **4.15** | [3.89, 4.43] / [3.59, 4.75] | 0.036 | 961 / 1025 / 1029 / 1507 | 291 | 453 | 1.18 | 618 | 163.6 | 1.01 |
-| zipformer-zh-14M | FP32 | 13.49 | [13.00, 13.99] / [11.68, 15.31] | 0.016 | 665 / 638 / 958 / 1596 | 291 | 417 | 1.18 | 333 | 55.3 | 0.26 |
+| **X-ASR 480 ms**（預設）‡ | encoder / joiner INT8，decoder FP32 | **4.11** | [3.85, 4.38] | 0.030 | 1487 / 1533 / 1623 / 2073 | 972 / 1029 | 291 | 451 | 1.19 | 622 | 163.6 |
+| X-ASR 160 ms‡ | 同上 | 5.05 | [4.76, 5.35] | 0.067 | 1359 / 1369 / 1559 / 1819 | 845 / 1023 | 291 | 523 | 1.19 | 626 | 163.6 |
+| zipformer-zh-14M（320 ms） | FP32 | 12.92 | [12.44, 13.41] | 0.013 | 1179 / 1144 / 1464 / 1844 | 666 / 958 | 291 | 416 | 1.19 | 335 | 55.3 |
 
-- 模型大小含 VAD（2.3 MB）與 tokens。X-ASR 參數量尚未統計；zh-14M 約 14M、Silero VAD 約 2M。
+![chunk 大小 vs CER vs 端到端首字延遲](docs/latency_tradeoff.png)
+
+- X-ASR 160 ms 對 480 ms（同一批句子成對比較）：CER +0.94 個百分點（95% CI [0.77, 1.11]，顯著），端到端首字延遲平均 −128 ms，RTF 2.2 倍。預設維持 480 ms。
+- 模型大小含 VAD（2.3 MB）與 tokens。X-ASR 約 0.16B（官方 README 比較表）；zh-14M 約 14M、Silero VAD 約 2M。
+- 以說話人重抽的 CER 信賴區間與上一版基準（未補靜音，commit `982ca41`：X-ASR 4.15%、zh-14M 13.49%）見 [docs/progress.md](docs/progress.md)。
 - CER 信賴區間是 95% 百分位 bootstrap（10000 次）：「以句」重抽句子，「以說話人」重抽 20 位說話人（較寬，接近換一批說話人的不確定性）。定義見 [docs/eval.md](docs/eval.md)。比較兩個設定時用同一批句子做成對 bootstrap，見 [docs/progress.md](docs/progress.md)。
 - 上一版基準（200 句子集）：X-ASR 5.07%（95% CI [4.04, 6.18]）、zh-14M 15.27%（[13.34, 17.35]），都包含 3000 句的值，兩者沒有矛盾，差距在 200 句的抽樣誤差內。
 - RTF 同設定重跑相差約 5%；辨識結果、CER、首字延遲、切段數可逐位重現，尾字延遲含實測計算時間，重跑差幾 ms。
 
+§ RTF 的分母含前補的 1 秒靜音。
+¶ 端到端首字延遲的起點是補靜音結束點，含原始音訊開頭未標註的靜音，絕對值高估實際感受到的延遲，只適合設定之間比較；首字延遲（VAD 起點）以 VAD 判定的語音起點為起點。定義見 [docs/eval.md](docs/eval.md)。
 \* AISHELL 句尾靜音短（中位數約 410 ms），min_silence 500 ms 以上時句子多由音訊結束收尾，尾字延遲被截斷；即時輸入時約為 min_silence + 40 ms。
 † 峰值 RSS 隨評測句數增加（200 句時 X-ASR 531、zh-14M 252 MB），增加的部分來自評測 / pipeline 端，不是模型推論（單獨解碼 100 → 1000 句只增加約 3 MB），原因待查，見 [backlog B11](docs/backlog.md)。不同評測集之間的峰值 RSS 不要直接比較。
 ‡ X-ASR 的訓練資料是否含 AISHELL-1 未知（見 [docs/models.md](docs/models.md)），這個 CER 不能當作跨領域泛化能力；zh-14M 依文件只用 WenetSpeech，對它是跨領域。
@@ -149,7 +156,7 @@ CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句；VAD 為 Silero v6
 **評測方法**
 
 - **延遲是模擬即時**：假設音訊準時到達、沒有其他程序搶 CPU，不含音訊驅動的緩衝延遲。麥克風路徑（`demo_mic.py`）能印出牆鐘延遲，但尚未與模擬值做正式對比。
-- **首字延遲的起點取自 VAD 本身**，不是強制對齊的真實起音；VAD 切得晚時延遲反而「看起來較好」，VAD 起點誤差（約 ±50 ms）會直接進入指標。
+- **還沒有真實語音起點**：端到端首字延遲不依賴 VAD，但含原始音訊開頭未標註的靜音，只能做相對比較；以 VAD 起點的首字延遲則受 VAD 切點影響（VAD 切得晚時反而「看起來較好」）。
 - **評測集太乾淨**：AISHELL-1 是安靜環境的單句朗讀，沒有長靜音、背景噪音、連續多句，VAD 的誤觸發與句間切分沒有被量到；尾字延遲也因句尾靜音短而被低估。
 - **不是完整 test set**：3000 句佔 7176 句的 42%，論文的 AISHELL-1 CER 通常用完整集，不能逐位對照；VAD / pre-roll 掃描只在 200 句子集上做過。音訊來自第三方鏡像 `shenyunhang/AISHELL-1`，無法對官方 checksum 驗證。
 - **說話人只有 20 位**：以說話人重抽的 CER 信賴區間比以句重抽寬約 2 倍（X-ASR）到 3.6 倍（zh-14M）。
@@ -163,7 +170,7 @@ CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句；VAD 為 Silero v6
 
 **系統**
 
-- **首字延遲約 1 秒**，幾乎全是 X-ASR 480 ms chunk 的演算法延遲（計算每個 chunk 約 13 ms），換 Core ML / ANE 無法改善，要換更小 chunk 的模型。
+- **首字延遲約 1 秒**（VAD 起點），計算每個 chunk 約 13 ms，換 Core ML / ANE 無法改善。換 160 ms chunk 只快約 130 ms 且 CER 顯著變差：瓶頸是模型多晚輸出第一個字，原因要靠字級對齊的評測集才能釐清（backlog B4 / B5）。
 - **單一靜音閾值無法同時切對句中停頓與句間停頓**：min_silence 500 ms 時仍有 16% 的單句音訊被切成多段，而自然口語的句間停頓可短至 290 ms、會被合併。
 - **記憶體偏重**：X-ASR 載入後 RSS 比載入前多約 435 MB，遠大於模型檔 164 MB。關掉 ONNX Runtime 的 CPU memory arena 沒有效果（載入與峰值都在 ±1 MB 內），增加發生在載入階段而非推論；多出的部分是 sherpa-onnx 2.0.1 內附的 ONNX Runtime 1.28.2 在載入時留下約 180–190 MB 已釋放但未歸還的 malloc 記憶體（碎片），不是權重存了兩份；ORT 1.30.0 起沒有這個現象。見 [docs/progress.md](docs/progress.md)。
 - 目前只跑 CPU；只在 macOS 驗證過。

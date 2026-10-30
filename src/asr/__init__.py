@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 from src.asr.base import AsrStream, StreamingAsr
 from src.asr.sherpa import (
+    X_ASR_160MS,
     X_ASR_480MS,
     ZIPFORMER_ZH_14M,
     SherpaTransducerAsr,
@@ -40,6 +41,9 @@ TRANSDUCER_SPECS: dict[str, tuple[TransducerFiles, float]] = {
     # chunk 48 frame（480 ms）+ 右側 context 13 frame。實測補 1.2 s 仍會漏句尾的字，
     # 1.4–3.0 s 結果相同；取 1.6 s 留餘量，finalize 計算量與 1.4 s 相同。
     "x-asr-480ms-int8": (X_ASR_480MS, 1.6),
+    # chunk 16 frame（160 ms）+ 右側 context 13 frame。AISHELL 200 句 + 4 個官方測試音訊整句解碼：
+    # 補 1.6 s 仍有 3/204 句漏句尾的字，2.0–4.0 s 結果完全相同；取 2.0 s（finalize 約 121 ms）。
+    "x-asr-160ms-int8": (X_ASR_160MS, 2.0),
 }
 
 
