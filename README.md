@@ -33,6 +33,7 @@ uv run pytest                             # 跑測試
 uv run scripts/demo_vad.py [input.wav]    # VAD：印出語音段時間（--stream 看串流事件）
 uv run scripts/demo_asr.py [input.wav]    # 串流 ASR：模擬即時逐 chunk 送入，印出 partial / 最終結果
                                           # --model x-asr-480ms-int8（預設）| zipformer-zh-14m
+uv run scripts/run_pipeline.py [input.wav] -o out.json  # VAD + ASR：每句文字與時間戳（JSON）
 ```
 
 `check_env.py` 最後一行印出 `OK` 就代表環境可用；只要有任何一項失敗，它會以非零狀態碼結束。預期看到的 ONNX Runtime providers 有 `CoreMLExecutionProvider` 和 `CPUExecutionProvider`。
@@ -77,7 +78,8 @@ models/ data/  模型與資料（不進版控）
 - [x] 模型下載腳本（含 checksum 校驗）
 - [x] VAD 模組
 - [x] 串流 ASR 模組
-- [ ] pipeline：wav / 麥克風輸入
+- [x] pipeline：wav 輸入（VAD + 串流 ASR，每句時間戳）
+- [ ] pipeline：麥克風輸入
 - [ ] 評測：CER、RTF、首字延遲、峰值記憶體、模型大小
 - [ ] 基準指標寫入 README
 

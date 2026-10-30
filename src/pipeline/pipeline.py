@@ -1,0 +1,244 @@
+"""VAD + 串流 ASR：逐 chunk 送入音訊，VAD 偵測到語音開始就建立 ASR stream，語音中持續送入，
+語音結束時 finalize 並輸出整句結果。
+
+pre-roll：VAD 的「開始」事件要等語音持續 min_speech_ms 才發出，事件位置（`VadEvent.sample`，已含
+speech_pad_ms）也可能切在首字的弱起音上。因此 pipeline 保留最近一段音訊，建立 stream 時從
+`事件位置 - pre_roll_ms` 開始送入 ASR；但不早於上一句已送入 ASR 的終點，避免同一段音訊辨識兩次。
+
+時間記錄（全部以秒為單位、以音訊開頭為 0）分兩類：
+- 音訊時間軸上的位置：`speech_start_s`、`speech_end_s`、`audio_start_s`。
+- 「模擬即時」的發出時刻：`*_emitted_s`。假設音訊依實際時長節奏到達，一個 chunk 要等最後一個
+  樣本到達才能送入；送入後的計算時間以 `clock` 實際量測並累加。若計算比音訊慢，會自然積壓到
+  後面的 chunk。因此不需要真的 sleep，也能得到與即時餵入一致的延遲（chunk 大小會影響結果，
+  報告時要註明）。
+"""
+
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Literal
+
+import numpy as np
+import numpy.typing as npt
+
+from src.asr import SAMPLE_RATE, AsrStream, StreamingAsr
+from src.vad import FrameClassifier, StreamingVad, VadConfig, VadEvent
+
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    vad: VadConfig = field(default_factory=VadConfig)
+    # 送入 ASR 的音訊比 VAD 起點（已含 speech_pad_ms）再往前多取的長度。
+    # 100 ms 取自 7 句的小規模對比（docs/progress.md），正式值待評測集上以 CER 決定。
+    pre_roll_ms: int = 100
+
+    def __post_init__(self) -> None:
+        if self.pre_roll_ms < 0:
+            raise ValueError("pre_roll_ms 不可為負")
+
+
+@dataclass(frozen=True)
+class Partial:
+    emitted_s: float
+    text: str
+
+
+@dataclass
+class Utterance:
+    """一句話的結果。`*_s` 的意義見模組說明。"""
+
+    index: int
+    speech_start_s: float  # VAD 起點（含 speech_pad_ms）
+    audio_start_s: float  # 實際送入 ASR 的第一個樣本（含 pre-roll）
+    start_emitted_s: float  # VAD 發出「開始」事件、建立 ASR stream 的時刻
+    first_token_s: float | None = None  # 第一個非空 partial 出現的時刻
+    speech_end_s: float | None = None  # VAD 終點（含 speech_pad_ms）
+    end_emitted_s: float | None = None  # VAD 發出「結束」事件的時刻
+    final_s: float | None = None  # finalize 完成、最終文字可用的時刻
+    text: str = ""
+    partials: list[Partial] = field(default_factory=list)
+
+    @property
+    def first_token_latency_s(self) -> float | None:
+        """首字延遲：語音起點（VAD 起點）→ 第一個非空 partial。"""
+        if self.first_token_s is None:
+            return None
+        return self.first_token_s - self.speech_start_s
+
+    @property
+    def tail_latency_s(self) -> float | None:
+        """尾字延遲：語音終點（VAD 終點）→ 最終結果。含 VAD 的 min_silence_ms 等待。"""
+        if self.final_s is None or self.speech_end_s is None:
+            return None
+        return self.final_s - self.speech_end_s
+
+
+@dataclass(frozen=True)
+class PipelineEvent:
+    kind: Literal["start", "partial", "final"]
+    utterance: Utterance
+
+
+class _AudioHistory:
+    """保留最近 `capacity` 個樣本，以絕對樣本索引取用。"""
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = capacity
+        self._data = np.zeros(0, dtype=np.float32)
+        self.start = 0  # _data[0] 的絕對樣本索引
+
+    @property
+    def end(self) -> int:
+        return self.start + len(self._data)
+
+    def append(self, chunk: npt.NDArray[np.float32]) -> None:
+        self._data = np.concatenate([self._data, chunk])
+
+    def trim(self) -> None:
+        excess = len(self._data) - self.capacity
+        if excess > 0:
+            self._data = self._data[excess:]
+            self.start += excess
+
+    def slice(self, begin: int, end: int) -> npt.NDArray[np.float32]:
+        if begin < self.start or end > self.end:
+            raise IndexError(f"[{begin}, {end}) 超出保留範圍 [{self.start}, {self.end})")
+        return self._data[begin - self.start : end - self.start]
+
+
+class StreamingPipeline:
+    """逐 chunk 送入 → 回傳這次新產生的事件（開始 / partial 變化 / 整句結果）。
+
+    pipeline = StreamingPipeline(vad_model, asr)
+    for chunk in chunks:
+        for ev in pipeline.accept_waveform(chunk):
+            ...
+    for ev in pipeline.flush():
+        ...
+    pipeline.utterances  # 所有已完成的句子
+    """
+
+    def __init__(
+        self,
+        vad_model: FrameClassifier,
+        asr: StreamingAsr,
+        config: PipelineConfig | None = None,
+        clock: Callable[[], float] = time.perf_counter,
+    ) -> None:
+        if asr.sample_rate != SAMPLE_RATE:
+            raise ValueError(f"ASR 取樣率 {asr.sample_rate} 與 VAD {SAMPLE_RATE} 不符")
+        self.config = config or PipelineConfig()
+        self.vad = StreamingVad(vad_model, self.config.vad)
+        self.asr = asr
+        self._clock = clock
+        self._pre_roll = self.config.pre_roll_ms * SAMPLE_RATE // 1000
+        vad_cfg = self.config.vad
+        # 「開始」事件最多落後事件位置 min_speech + pad + 一個 frame；再加 pre-roll 與一些餘裕
+        lookback_ms = vad_cfg.min_speech_ms + vad_cfg.speech_pad_ms + self.config.pre_roll_ms + 100
+        self._history_capacity = lookback_ms * SAMPLE_RATE // 1000 + vad_model.frame_size
+        self.reset()
+
+    def reset(self) -> None:
+        self.vad.reset()
+        self._history = _AudioHistory(self._history_capacity)
+        self._received = 0
+        self._now = 0.0  # 模擬即時的目前時刻（秒）
+        self._call_t0 = 0.0
+        self._call_base = 0.0
+        self._stream: AsrStream | None = None
+        self._current: Utterance | None = None
+        self._fed_until = 0  # 目前 / 上一句已送入 ASR 的終點（絕對樣本索引）
+        self.utterances: list[Utterance] = []
+
+    @property
+    def in_speech(self) -> bool:
+        return self._stream is not None
+
+    def accept_waveform(self, chunk: npt.NDArray[np.floating]) -> list[PipelineEvent]:
+        """送入一段 16 kHz 單聲道 float 音訊，長度任意。"""
+        chunk = np.asarray(chunk, dtype=np.float32).reshape(-1)
+        self._received += len(chunk)
+        # chunk 的最後一個樣本到達後才能處理
+        self._begin_call(max(self._now, self._received / SAMPLE_RATE))
+        self._history.append(chunk)
+        events = self._handle(self.vad.accept_waveform(chunk))
+        if self._stream is not None:
+            events.extend(self._feed(self._received))
+        self._history.trim()
+        self._end_call()
+        return events
+
+    def flush(self) -> list[PipelineEvent]:
+        """輸入結束：結束仍在進行中的句子。之後需 `reset()` 才能重用。"""
+        self._begin_call(self._now)
+        events = self._handle(self.vad.flush())
+        self._end_call()
+        return events
+
+    # ----- 內部 -----
+
+    def _begin_call(self, base: float) -> None:
+        self._call_base = base
+        self._call_t0 = self._clock()
+
+    def _elapsed(self) -> float:
+        return self._call_base + (self._clock() - self._call_t0)
+
+    def _end_call(self) -> None:
+        self._now = self._elapsed()
+
+    def _handle(self, vad_events: list[VadEvent]) -> list[PipelineEvent]:
+        events: list[PipelineEvent] = []
+        for ev in vad_events:
+            if ev.kind == "start":
+                events.append(self._start(ev))
+                events.extend(self._feed(ev.detected_at))
+            else:
+                events.extend(self._feed(ev.detected_at))
+                events.append(self._finish(ev))
+        return events
+
+    def _start(self, ev: VadEvent) -> PipelineEvent:
+        assert self._stream is None, "VAD 事件應成對出現"
+        begin = max(ev.sample - self._pre_roll, self._fed_until, self._history.start)
+        self._stream = self.asr.create_stream()
+        self._fed_until = begin
+        self._current = Utterance(
+            index=len(self.utterances),
+            speech_start_s=ev.sample / SAMPLE_RATE,
+            audio_start_s=begin / SAMPLE_RATE,
+            start_emitted_s=self._elapsed(),
+        )
+        return PipelineEvent("start", self._current)
+
+    def _feed(self, until: int) -> list[PipelineEvent]:
+        """把 [_fed_until, until) 送入目前的 stream，partial 有變化時回傳事件。"""
+        stream, utt = self._stream, self._current
+        if stream is None or utt is None or until <= self._fed_until:
+            return []
+        stream.accept_waveform(self._history.slice(self._fed_until, until))
+        self._fed_until = until
+        text = stream.get_partial_result()
+        last = utt.partials[-1].text if utt.partials else ""
+        if text == last:
+            return []
+        now = self._elapsed()
+        utt.partials.append(Partial(now, text))
+        if utt.first_token_s is None and text.strip():
+            utt.first_token_s = now
+        return [PipelineEvent("partial", utt)]
+
+    def _finish(self, ev: VadEvent) -> PipelineEvent:
+        stream, utt = self._stream, self._current
+        assert stream is not None and utt is not None, "VAD 事件應成對出現"
+        utt.speech_end_s = ev.sample / SAMPLE_RATE
+        utt.end_emitted_s = self._elapsed()
+        utt.text = stream.finalize()
+        utt.final_s = self._elapsed()
+        if utt.first_token_s is None and utt.text.strip():
+            # partial 一直為空、直到 finalize 才出字（例如語音很短）
+            utt.first_token_s = utt.final_s
+        self._stream = None
+        self._current = None
+        self.utterances.append(utt)
+        return PipelineEvent("final", utt)
