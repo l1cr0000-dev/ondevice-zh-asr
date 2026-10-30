@@ -1,8 +1,9 @@
 """全鏈路評測：VAD + 串流 ASR 在評測集上的 CER / RTF / 首字延遲 / 峰值記憶體 / 模型大小 / 切段數。
 
 用法：
-    uv run scripts/prepare_eval_data.py      # 先準備資料（一次即可）
-    uv run eval/run_eval.py                  # 預設模型與 pipeline 設定
+    uv run scripts/prepare_eval_data.py      # 先準備資料（一次即可）：AISHELL-1 test 隨機 3000 句
+    uv run eval/run_eval.py                  # 預設模型與 pipeline 設定，3000 句正式評測集
+    uv run eval/run_eval.py --smoke          # 快速冒煙：固定 seed 抽樣的 200 句子集
     uv run eval/run_eval.py --model zipformer-zh-14m --min-silence-ms 500 --pre-roll-ms 200
     # 參數掃描：多個值取笛卡兒積，每個組合各存一份結果，最後印出總表
     uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \\
@@ -10,13 +11,15 @@
 
 每個組合在獨立子程序中執行（模型載入、推論、量峰值記憶體），父程序只負責 CER 與彙整，
 避免評測框架本身（jiwer、OpenCC）的記憶體算進去。結果存成 eval/results/<日期>_<設定名>.json，
-內含完整設定、機器資訊、commit、彙總指標與逐句結果。指標定義見 docs/eval.md。
+內含完整設定、機器資訊、commit、彙總指標（CER 附 95% bootstrap 信賴區間）與逐句結果。
+指標定義見 docs/eval.md。
 """
 
 import argparse
 import itertools
 import json
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -29,7 +32,9 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-DEFAULT_MANIFEST = REPO_ROOT / "data" / "aishell1_test_200" / "manifest.jsonl"
+DEFAULT_MANIFEST = REPO_ROOT / "data" / "aishell1_test_3000" / "manifest.jsonl"
+SMOKE_MANIFEST = REPO_ROOT / "data" / "aishell1_test_200" / "manifest.jsonl"
+BOOTSTRAP_RESAMPLES = 10000
 RESULTS_DIR = REPO_ROOT / "eval" / "results"
 
 
@@ -188,6 +193,34 @@ def _first_with_text(segments: list[dict[str, Any]]) -> dict[str, Any] | None:
     return next((s for s in segments if s["text"].strip()), None)
 
 
+def _speaker(uid: str) -> str | None:
+    """AISHELL 句子 ID（如 BAC009S0764W0121）中的說話人 S0764；其他格式回傳 None。"""
+    m = re.search(r"S\d{4}", uid)
+    return m.group(0) if m else None
+
+
+def cer_confidence(utts: list[dict[str, Any]]) -> dict[str, Any]:
+    """CER 的 95% 百分位 bootstrap 信賴區間：以句重抽，以及以說話人重抽（ID 無法解析時為 None）。"""
+    from eval.metrics import bootstrap_cer_ci, utterance_counts
+
+    errors, refs = utterance_counts([u["ref"] for u in utts], [u["hyp"] for u in utts])
+    speakers = [_speaker(u["id"]) for u in utts]
+    by_speaker = None
+    if all(speakers) and len(set(speakers)) > 1:
+        by_speaker = list(
+            bootstrap_cer_ci(errors, refs, [s or "" for s in speakers], BOOTSTRAP_RESAMPLES)
+        )
+    return {
+        "level": 0.95,
+        "method": "percentile bootstrap",
+        "n_resamples": BOOTSTRAP_RESAMPLES,
+        "seed": 0,
+        "utterance": list(bootstrap_cer_ci(errors, refs, None, BOOTSTRAP_RESAMPLES)),
+        "speaker": by_speaker,
+        "num_speakers": len(set(speakers)) if by_speaker else None,
+    }
+
+
 def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> dict[str, Any]:
     from eval.metrics import corpus_cer, summarize
     from eval.text_norm import normalize
@@ -235,6 +268,7 @@ def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> d
             "num_utterances": len(utts),
             "audio_s": total_audio,
             "cer": cer.cer,
+            "cer_ci95": cer_confidence(utts),
             "cer_counts": asdict(cer),
             "rtf": total_compute / total_audio,
             "first_token_latency_ms": summarize(first_token_ms),
@@ -278,8 +312,12 @@ def _fmt(x: float | None, spec: str = ".0f") -> str:
     return "-" if x is None else format(x, spec)
 
 
+def _ci(ci: list[float] | None) -> str:
+    return "-" if ci is None else f"[{ci[0] * 100:.2f}, {ci[1] * 100:.2f}]"
+
+
 TABLE_HEADER = (
-    "| model | min_sil | pre_roll | CER % | RTF | first-token mean / P90 (ms) "
+    "| model | min_sil | pre_roll | CER % | CER 95% CI (utt) | RTF | first-token mean / P90 (ms) "
     "| tail mean (ms) | seg/utt (max) | peak RSS (MB) | model (MB) |"
 )
 
@@ -289,7 +327,8 @@ def table_row(res: dict[str, Any]) -> str:
     ft, seg = m["first_token_latency_ms"], m["segments_per_utterance"]
     return (
         f"| {c['model']} | {c['vad_min_silence_ms']} | {c['pre_roll_ms']} "
-        f"| {m['cer'] * 100:.2f} | {m['rtf']:.4f} | {_fmt(ft['mean'])} / {_fmt(ft['p90'])} "
+        f"| {m['cer'] * 100:.2f} | {_ci(m['cer_ci95']['utterance'])} | {m['rtf']:.4f} "
+        f"| {_fmt(ft['mean'])} / {_fmt(ft['p90'])} "
         f"| {_fmt(m['tail_latency_ms']['mean'])} | {seg['mean']:.2f} ({seg['max']}) "
         f"| {m['memory_mb']['peak_rss']:.0f} | {m['model_size_mb']:.1f} |"
     )
@@ -300,7 +339,7 @@ def print_detail(res: dict[str, Any]) -> None:
 
     c, m, env = res["config"], res["metrics"], res["environment"]
     ft, tail, cc = m["first_token_latency_ms"], m["tail_latency_ms"], m["cer_counts"]
-    seg = m["segments_per_utterance"]
+    seg, ci = m["segments_per_utterance"], m["cer_ci95"]
     vad = (
         f"threshold={c['vad_threshold']} min_speech={c['vad_min_speech_ms']}ms"
         f" min_silence={c['vad_min_silence_ms']}ms pad={c['vad_speech_pad_ms']}ms"
@@ -312,6 +351,10 @@ def print_detail(res: dict[str, Any]) -> None:
     ftl = (
         f"mean {_fmt(ft['mean'])}  P50 {_fmt(ft['p50'])}  P90 {_fmt(ft['p90'])}"
         f"  P99 {_fmt(ft['p99'])}  (n={ft['n']}，無輸出 {m['no_text_utterances']} 句)"
+    )
+    ci_s = (
+        f"以句重抽 {_ci(ci['utterance'])}  以說話人重抽 {_ci(ci['speaker'])}"
+        f"（{ci['num_speakers'] or '-'} 位）"
     )
     mem = m["memory_mb"]
     mem_s = (
@@ -329,6 +372,7 @@ def print_detail(res: dict[str, Any]) -> None:
         ),
         ("句數 / 音訊", f"{m['num_utterances']} 句 / {m['audio_s'] / 60:.1f} 分鐘"),
         ("CER", f"{m['cer'] * 100:.2f}%  ({counts})"),
+        ("  95% 信賴區間", ci_s),
         ("RTF", f"{m['rtf']:.4f}"),
         ("首字延遲 (ms)", ftl),
         ("  其中 VAD 觸發 (ms)", f"mean {_fmt(m['vad_start_delay_ms']['mean'])}"),
@@ -350,7 +394,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="全鏈路評測（VAD + 串流 ASR）。多個值的參數取笛卡兒積做掃描。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help="評測集 manifest")
+    data = p.add_mutually_exclusive_group()
+    data.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help="評測集 manifest")
+    data.add_argument(
+        "--smoke",
+        dest="manifest",
+        action="store_const",
+        const=SMOKE_MANIFEST,
+        help=f"改用 200 句子集快速冒煙（{SMOKE_MANIFEST.relative_to(REPO_ROOT)}）",
+    )
     add_pipeline_args(p, sweep=True)
     p.add_argument(
         "--warmup", type=non_negative_int, default=3, help="正式計時前先跑幾句暖機（不計入）"
@@ -371,12 +423,14 @@ def main() -> int:
 
     args = parse_args()
     if not args.manifest.is_file():
+        hint = " -n 200" if args.manifest == SMOKE_MANIFEST else ""
         print(
-            f"錯誤：找不到 {args.manifest}，請先執行 uv run scripts/prepare_eval_data.py",
+            f"錯誤：找不到 {args.manifest}，請先執行 uv run scripts/prepare_eval_data.py{hint}",
             file=sys.stderr,
         )
         return 1
     manifest = args.manifest.resolve()
+    dataset = manifest.parent.name  # 結果檔名前綴，不同評測集的結果不互相覆寫
     lines = [line for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not lines:
         print(f"錯誤：{manifest} 是空的", file=sys.stderr)
@@ -417,7 +471,7 @@ def main() -> int:
     for i, cfg in enumerate(configs, 1):
         print(f"[{i}/{len(configs)}] {cfg.name}", file=sys.stderr)
         res = summarize_run(cfg, run_one(cfg), env)
-        out = args.results_dir / f"{today}_{cfg.name}{suffix}.json"
+        out = args.results_dir / f"{today}_{dataset}_{cfg.name}{suffix}.json"
         out.write_text(json.dumps(res, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print_detail(res)
         print(f"結果：{out.relative_to(REPO_ROOT) if out.is_relative_to(REPO_ROOT) else out}")
@@ -430,7 +484,7 @@ def main() -> int:
         print(table_row(s))
     if len(summaries) > 1:
         tag = f"_{args.tag}" if args.tag else ""
-        out = args.results_dir / f"{today}_summary{tag}{suffix}.json"
+        out = args.results_dir / f"{today}_{dataset}_summary{tag}{suffix}.json"
         out.write_text(
             json.dumps({"environment": env, "runs": summaries}, ensure_ascii=False, indent=2)
             + "\n",

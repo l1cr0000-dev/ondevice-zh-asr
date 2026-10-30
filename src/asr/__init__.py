@@ -22,6 +22,7 @@ from src.audio import SAMPLE_RATE
 __all__ = [
     "DEFAULT_MODEL",
     "SAMPLE_RATE",
+    "TRANSDUCER_SPECS",
     "AsrStream",
     "SherpaTransducerAsr",
     "SherpaTransducerConfig",
@@ -33,15 +34,24 @@ __all__ = [
 
 DEFAULT_MODEL = "x-asr-480ms-int8"
 
-_REGISTRY: dict[str, Callable[[int], StreamingAsr]] = {
-    "zipformer-zh-14m": lambda threads: SherpaTransducerAsr(
-        ZIPFORMER_ZH_14M, SherpaTransducerConfig(num_threads=threads)
-    ),
+# sherpa-onnx transducer 模型：名稱 → (模型檔, 句尾補零秒數)。也供 scripts/probe_memory.py 直接載入。
+TRANSDUCER_SPECS: dict[str, tuple[TransducerFiles, float]] = {
+    "zipformer-zh-14m": (ZIPFORMER_ZH_14M, 0.66),
     # chunk 48 frame（480 ms）+ 右側 context 13 frame。實測補 1.2 s 仍會漏句尾的字，
     # 1.4–3.0 s 結果相同；取 1.6 s 留餘量，finalize 計算量與 1.4 s 相同。
-    "x-asr-480ms-int8": lambda threads: SherpaTransducerAsr(
-        X_ASR_480MS, SherpaTransducerConfig(num_threads=threads, tail_padding_s=1.6)
-    ),
+    "x-asr-480ms-int8": (X_ASR_480MS, 1.6),
+}
+
+
+def _transducer(name: str) -> Callable[[int], StreamingAsr]:
+    files, tail_padding_s = TRANSDUCER_SPECS[name]
+    return lambda threads: SherpaTransducerAsr(
+        files, SherpaTransducerConfig(num_threads=threads, tail_padding_s=tail_padding_s)
+    )
+
+
+_REGISTRY: dict[str, Callable[[int], StreamingAsr]] = {
+    name: _transducer(name) for name in TRANSDUCER_SPECS
 }
 
 

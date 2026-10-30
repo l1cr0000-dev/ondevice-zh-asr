@@ -1,8 +1,10 @@
-"""準備評測資料：從 AISHELL-1 test set（7176 句）以固定 seed 隨機抽樣，下載 wav 並寫出 manifest。
+"""準備評測資料：下載 AISHELL-1 test set（7176 句）或以固定 seed 抽樣的子集，並寫出 manifest。
 
 用法：
-    uv run scripts/prepare_eval_data.py                 # 預設：200 句、seed 20261030
-    uv run scripts/prepare_eval_data.py -n 500 --seed 1 --out data/aishell1_test_500
+    uv run scripts/prepare_eval_data.py                 # 預設：正式評測集 3000 句 → data/aishell1_test_3000
+    uv run scripts/prepare_eval_data.py -n 200          # 冒煙子集（seed 20261030）→ data/aishell1_test_200
+    uv run scripts/prepare_eval_data.py -n 7176         # 完整 test set → data/aishell1_test_full（約 1.1 GB）
+    uv run scripts/prepare_eval_data.py -n 500 --seed 1 --out data/aishell1_test_500_seed1
 
 資料來源（固定 revision，確保每次抽到同樣的句子、拿到同樣的檔案）：
 - 音訊：Hugging Face `shenyunhang/AISHELL-1`，保留官方 `data_aishell/wav/test/<說話人>/<句子>.wav`
@@ -13,7 +15,9 @@
   以下方寫死的 SHA-256 校驗。
 
 抽樣：把 test set 全部句子 ID 排序後，`random.Random(seed).sample(ids, n)`，結果再依 ID 排序。
-抽樣只依賴 ID 清單與 seed，不依賴下載順序。若 test set 句數不是 7176 會直接報錯。
+抽樣只依賴 ID 清單與 seed，不依賴下載順序；n = 7176 時就是全部句子。若 test set 句數不是 7176
+會直接報錯。不給 --out 時輸出目錄依 n 決定（aishell1_test_full / aishell1_test_<n>），換 seed 時
+請自行指定 --out，以免覆寫預設 seed 的子集。
 
 輸出（data/ 不進 git）：
     <out>/wav/<句子ID>.wav
@@ -25,6 +29,7 @@
 
 import argparse
 import hashlib
+import http.client
 import json
 import random
 import re
@@ -50,29 +55,43 @@ TRANSCRIPT_PATH = "data_aishell/transcript/aishell_transcript_v0.8.txt"
 TRANSCRIPT_SHA256 = "b5f33b9e0b47548e20a5ea4e504297f80df41d559133924c4e5b7b544c15b5c4"
 TEST_SET_SIZE = 7176
 
-DEFAULT_N = 200
+DEFAULT_N = 3000  # 正式評測集：約 4.3 小時音訊、下載約 470 MB；完整 7176 句約 1.1 GB
 DEFAULT_SEED = 20261030
-DEFAULT_OUT = REPO_ROOT / "data" / "aishell1_test_200"
+
+
+def default_out(n: int) -> Path:
+    return (
+        REPO_ROOT / "data" / ("aishell1_test_full" if n == TEST_SET_SIZE else f"aishell1_test_{n}")
+    )
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="從 AISHELL-1 test set 以固定 seed 抽樣、下載 wav 並寫出 manifest。",
+        description="下載 AISHELL-1 test set（或以固定 seed 抽樣的子集）並寫出 manifest。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("-n", "--num", type=int, default=DEFAULT_N, help="抽樣句數")
+    p.add_argument("-n", "--num", type=int, default=DEFAULT_N, help="句數（7176 = 完整 test set）")
     p.add_argument("--seed", type=int, default=DEFAULT_SEED, help="隨機種子")
-    p.add_argument("--out", type=Path, default=DEFAULT_OUT, help="輸出目錄")
+    p.add_argument(
+        "--out",
+        type=Path,
+        help="輸出目錄（預設 data/aishell1_test_full 或 data/aishell1_test_<n>）",
+    )
     p.add_argument("--jobs", type=int, default=8, help="並行下載數")
     return p.parse_args()
 
 
-def _get(url: str, retries: int = 3) -> tuple[bytes, dict[str, str]]:
+# 網路錯誤：urllib 的 URLError / HTTPError 與逾時都是 OSError；連線中斷造成的截斷回應
+# （IncompleteRead）則是 http.client.HTTPException，不是 OSError。
+NETWORK_ERRORS = (OSError, http.client.HTTPException)
+
+
+def _get(url: str, retries: int = 5) -> tuple[bytes, dict[str, str]]:
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(url, timeout=60) as r:
                 return r.read(), dict(r.headers)
-        except OSError:
+        except NETWORK_ERRORS:
             if attempt == retries - 1:
                 raise
             time.sleep(2**attempt)
@@ -138,9 +157,11 @@ def main() -> int:
     if args.jobs <= 0:
         print("錯誤：--jobs 必須為正數", file=sys.stderr)
         return 2
+    if args.out is None:
+        args.out = default_out(args.num)
     try:
         return prepare(args)
-    except OSError as e:  # 網路錯誤（urllib 的 URLError / HTTPError 都是 OSError）或寫檔失敗
+    except NETWORK_ERRORS as e:  # 重試後仍失敗的網路錯誤，或寫檔失敗
         print(f"錯誤：{type(e).__name__}: {e}", file=sys.stderr)
         print("可重新執行；已下載且校驗通過的檔案會跳過。", file=sys.stderr)
         return 1

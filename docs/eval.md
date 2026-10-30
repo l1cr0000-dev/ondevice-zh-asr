@@ -3,27 +3,34 @@
 全鏈路（VAD + 串流 ASR）的評測方法、指標定義與文字正規化規則。程式在 `eval/`，資料準備在 `scripts/prepare_eval_data.py`。
 
 ```bash
-uv run scripts/prepare_eval_data.py      # 下載並抽樣評測集到 data/（一次即可，可重複執行）
-uv run eval/run_eval.py                  # 預設設定跑一次
+uv run scripts/prepare_eval_data.py      # 下載正式評測集（AISHELL-1 test 隨機 3000 句）到 data/（一次即可，可重複執行）
+uv run scripts/prepare_eval_data.py -n 200   # 200 句冒煙子集
+uv run eval/run_eval.py                  # 預設設定，3000 句正式評測集
+uv run eval/run_eval.py --smoke          # 200 句子集，快速確認沒有改壞（約 1 分鐘 / 模型）
 uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
     --min-silence-ms 100 300 500 800 --pre-roll-ms 0 100 200 300 --tag sweep   # 參數掃描
 ```
 
 多個值的參數（`--model`、`--min-silence-ms`、`--pre-roll-ms`、`--chunk-ms`、`--threads`）取笛卡兒積。
 `--limit N` 只跑前 N 句（除錯用）。`--help` 列出全部參數與預設值。
+正式報告的數字一律用 3000 句評測集；`--smoke` 只用來在改動後快速確認結果沒變（200 句的 CER 信賴區間約 ±1 個百分點，不適合下結論）。
+`--manifest data/aishell1_test_full/manifest.jsonl` 可跑完整 7176 句（需先 `prepare_eval_data.py -n 7176`，約 1.1 GB）。
 
 ## 評測資料
 
-| 項目 | 值 |
-|---|---|
-| 母體 | AISHELL-1 test set，20 位說話人、7176 句（腳本會檢查句數） |
-| 抽樣 | `sorted(random.Random(20261030).sample(sorted(全部 ID), 200))` |
-| 規模 | 200 句、17.2 分鐘、20 位說話人全部涵蓋 |
-| 音訊來源 | Hugging Face `shenyunhang/AISHELL-1`，固定 revision `2724409d53`，逐檔以 LFS SHA-256 校驗 |
-| 標註來源 | 同 repo 的 `aishell_transcript_v0.8.txt`，SHA-256 `b5f33b9e…`（寫死在腳本中） |
-| 輸出 | `data/aishell1_test_200/{wav/, manifest.jsonl, meta.json}`，不進 git |
+| 項目 | 正式評測集 | 冒煙子集 |
+|---|---|---|
+| 母體 | AISHELL-1 test set，20 位說話人、7176 句（腳本會檢查句數） | 同左 |
+| 抽樣 | `sorted(random.Random(20261030).sample(sorted(全部 ID), 3000))` | 同左，200 句（與 3000 句是各自獨立的抽樣，不是子集關係） |
+| 規模 | 3000 句、251.2 分鐘（4.19 小時）、20 位說話人 | 200 句、17.2 分鐘、20 位說話人全部涵蓋 |
+| 指令 | `prepare_eval_data.py`（預設） | `prepare_eval_data.py -n 200` |
+| 輸出 | `data/aishell1_test_3000/` | `data/aishell1_test_200/` |
+| 音訊來源 | Hugging Face `shenyunhang/AISHELL-1`，固定 revision `2724409d53`，逐檔以 LFS SHA-256 校驗 | 同左 |
+| 標註來源 | 同 repo 的 `aishell_transcript_v0.8.txt`，SHA-256 `b5f33b9e…`（寫死在腳本中） | 同左 |
 
-選這個來源的原因：官方 `AISHELL/AISHELL-1` 的 Hugging Face repo 只上傳了 100 位訓練集說話人，沒有 test set；OpenSLR SLR33 只提供 15 GB 的完整壓縮檔。`shenyunhang/AISHELL-1` 保留官方的 `data_aishell/wav/test/<說話人>/<句子>.wav` 結構，可以只下載抽中的 200 個檔案（約 33 MB）。它是第三方鏡像，不是官方發布；句數與標註檔大小都與官方一致，但音訊內容無法對官方 checksum 驗證。
+輸出目錄內含 `wav/`、`manifest.jsonl`、`meta.json`，不進 git。模型訓練資料是否含 AISHELL-1 見 [models.md](models.md)。
+
+選這個來源的原因：官方 `AISHELL/AISHELL-1` 的 Hugging Face repo 只上傳了 100 位訓練集說話人，沒有 test set；OpenSLR SLR33 只提供 15 GB 的完整壓縮檔。`shenyunhang/AISHELL-1` 保留官方的 `data_aishell/wav/test/<說話人>/<句子>.wav` 結構，可以只下載抽中的檔案（200 句約 32 MB、3000 句約 470 MB）。它是第三方鏡像，不是官方發布；句數與標註檔大小都與官方一致，但音訊內容無法對官方 checksum 驗證。
 
 ## 執行方式
 
@@ -51,6 +58,13 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 ### CER
 
 `CER = (S + D + I) / N`，以上述 token 為單位、用 jiwer 計算編輯距離。報告**語料級** CER：全部句子的錯誤數總和 / 參考 token 總數，不是逐句 CER 的平均。VAD 漏掉整句時，假設為空，全部算刪除。
+
+**95% 信賴區間**（`metrics.cer_ci95`）：百分位 bootstrap，重抽 10000 次、seed 0，每次重新計算語料級 CER（Σ錯誤 / Σ字數），取 2.5% 與 97.5% 分位數。報告兩種：
+
+- **以句重抽**（`utterance`，主要報告值）：把句子當成獨立樣本。回答「同樣這 20 位說話人、換一批句子，CER 會落在哪裡」。
+- **以說話人重抽**（`speaker`）：cluster bootstrap，每次抽 20 位說話人（可重複），帶入各自全部句子。同一說話人的句子錯誤率彼此相關，這個區間較寬，比較接近「換一批說話人」時的不確定性。說話人只有 20 位，區間本身也不太穩定，作為輔助參考。說話人由句子 ID 中的 `S\d{4}` 解析，解析不到時為 `null`。
+
+比較兩個設定時，信賴區間重疊不代表差異不顯著；要用同一批句子的成對 bootstrap（見 progress.md）。
 
 ### RTF
 
@@ -91,13 +105,13 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 
 ## 結果檔
 
-每個設定一個檔案：`eval/results/<日期>_<設定名>.json`，設定名為 `<模型>_sil<min_silence_ms>_pre<pre_roll_ms>_chunk<chunk_ms>_t<執行緒數>`；掃描另存總表 `<日期>_summary_<tag>.json`。`eval/results/` 不進 git。
+每個設定一個檔案：`eval/results/<日期>_<資料集>_<設定名>.json`，資料集是 manifest 所在目錄名（`aishell1_test_3000` / `aishell1_test_200` / `aishell1_test_full`），設定名為 `<模型>_sil<min_silence_ms>_pre<pre_roll_ms>_chunk<chunk_ms>_t<執行緒數>`；掃描另存總表 `<日期>_<資料集>_summary_<tag>.json`。`eval/results/` 不進 git。（2026-10-30 以前的結果檔名沒有資料集前綴，都是 200 句子集。）
 
 | 欄位 | 內容 |
 |---|---|
 | `config` | 模型（含 sherpa-onnx 檔名與解碼方式）、VAD 模型與全部參數、pre-roll、chunk、執行緒數、暖機句數、manifest 路徑 |
 | `environment` | commit（與是否有未提交改動）、機型、晶片、macOS 版本、Python 與套件版本 |
-| `metrics` | 上述全部指標與 CER 的 S / D / I / N |
+| `metrics` | 上述全部指標、CER 的 S / D / I / N 與 95% 信賴區間 |
 | `model_files` | 每個模型檔的路徑、大小、精度 |
 | `utterances` | 每句的參考、假設、正規化後文字、處理時間、每個句段的時間戳與延遲 |
 
@@ -105,6 +119,9 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 
 - 語音起點用 VAD，不是強制對齊，VAD 本身的起點誤差（約 ±50 ms）會進入首字延遲。
 - 延遲是模擬即時，假設音訊準時到達、沒有其他程序搶 CPU；真實麥克風輸入另有音訊驅動的緩衝延遲。
-- 200 句只佔 test set 的 2.8%。單一設定的 CER bootstrap 95% 信賴區間約 ±1.1 個百分點（X-ASR，CER 約 5%）/ ±2 個百分點（zh-14M，約 15%）。比較兩個設定時用同一批句子做**成對** bootstrap，靈敏得多（例如 0.4 個百分點的差距已接近顯著），數字見 progress.md。
+- 評測集只有 20 位說話人。以句重抽的信賴區間沒有反映說話人之間的差異，換一批說話人時的不確定性見以說話人重抽的區間。
+- 模型訓練資料是否含 AISHELL-1 會影響 CER 的解讀（同領域 / 跨領域 / 資料洩漏），見 [models.md](models.md)。
+- 3000 句佔 test set 的 42%。論文的 AISHELL-1 CER 通常是完整 7176 句，數字不能逐位對照。
+- 2026-10-30 的 VAD / pre-roll 參數掃描是在 200 句子集上做的；3000 句集只跑了預設設定。
 - 尾字延遲受句尾靜音長度限制：AISHELL 句尾靜音中位數約 410 ms、全部短於 800 ms，`min_silence_ms` 大於句尾靜音時句子由音訊結束（flush）收尾，量到的尾字延遲會低估即時輸入的實際值。
 - 同一天、同一設定名的結果會覆寫。

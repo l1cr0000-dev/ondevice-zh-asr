@@ -1,14 +1,15 @@
-"""評測模組測試：文字正規化、語料級 CER、分位數、端到端（小 manifest）。"""
+"""評測模組測試：文字正規化、語料級 CER 與信賴區間、分位數、端到端（小 manifest）。"""
 
 import json
 import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from eval.metrics import corpus_cer, summarize
-from eval.run_eval import RunConfig, summarize_run
+from eval.metrics import bootstrap_cer_ci, corpus_cer, summarize, utterance_counts
+from eval.run_eval import RunConfig, cer_confidence, summarize_run
 from eval.text_norm import normalize, tokenize
 from src.vad import DEFAULT_MODEL_PATH
 
@@ -63,6 +64,53 @@ def test_corpus_cer_applies_same_normalization() -> None:
 def test_corpus_cer_rejects_empty_reference() -> None:
     with pytest.raises(ValueError):
         corpus_cer(["，。"], ["你好"])
+
+
+def test_utterance_counts_sum_to_corpus_counts() -> None:
+    refs = ["今天天气", "好", "我们去公园", "你好"]
+    hyps = ["今天天汽", "坏", "我们去公园散步", ""]
+    errors, n = utterance_counts(refs, hyps)
+    assert errors == [1, 1, 2, 2] and n == [4, 1, 5, 2]
+    total = corpus_cer(refs, hyps)
+    assert (sum(errors), sum(n)) == (total.errors, total.ref_tokens)
+
+
+def test_bootstrap_ci_contains_estimate_and_is_reproducible() -> None:
+    rng = np.random.default_rng(1)
+    refs = rng.integers(5, 20, size=300)
+    errors = rng.binomial(refs, 0.1)
+    point = errors.sum() / refs.sum()
+    lo, hi = bootstrap_cer_ci(list(errors), list(refs), n_resamples=2000)
+    assert lo < point < hi and hi - lo < 0.05
+    assert (lo, hi) == bootstrap_cer_ci(list(errors), list(refs), n_resamples=2000)
+
+
+def test_bootstrap_ci_by_group_is_wider_when_groups_differ() -> None:
+    # 10 位說話人，每人 30 句，CER 依說話人在 2%–20% 之間：同一說話人的句子高度相關
+    refs, errors, groups = [], [], []
+    for spk, rate in enumerate(np.linspace(0.02, 0.2, 10)):
+        for _ in range(30):
+            refs.append(10)
+            errors.append(round(10 * rate))
+            groups.append(f"S{spk:04d}")
+    lo_u, hi_u = bootstrap_cer_ci(errors, refs, n_resamples=2000)
+    lo_g, hi_g = bootstrap_cer_ci(errors, refs, groups, n_resamples=2000)
+    assert hi_g - lo_g > 2 * (hi_u - lo_u)
+
+
+def test_cer_confidence_groups_by_aishell_speaker() -> None:
+    utts = [
+        {
+            "id": f"BAC009S07{6 + i % 2}4W{i:04d}",
+            "ref": "今天天气",
+            "hyp": "今天天汽" if i % 3 else "今天天气",
+        }
+        for i in range(12)
+    ]
+    ci = cer_confidence(utts)
+    assert ci["num_speakers"] == 2 and ci["speaker"] is not None
+    assert ci["utterance"][0] <= ci["utterance"][1]
+    assert cer_confidence([{"id": "fx", "ref": "好", "hyp": "好"}])["speaker"] is None
 
 
 def test_summarize() -> None:
