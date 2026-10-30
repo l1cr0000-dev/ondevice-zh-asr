@@ -10,11 +10,25 @@
 #     來源：https://github.com/snakers4/silero-vad
 #     授權：MIT
 #     檔案：models/silero-vad-v6.2.3/silero_vad.onnx（16 kHz / 8 kHz，FP32，約 2.3 MB）
+#
+#   串流 Zipformer transducer（中文，14M 參數）
+#     版本：sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23（sherpa-onnx release tag asr-models）
+#     來源：https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
+#     訓練資料：WenetSpeech；授權：Apache-2.0
+#     檔案：models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23/
+#           encoder/decoder/joiner 各有 FP32（約 53 MB）與 INT8（約 24 MB）兩版，另含 tokens.txt、test_wavs/
+#
+#   X-ASR 串流 Zipformer transducer（中英，480 ms chunk，官方 INT8 版）
+#     版本：sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05（release tag asr-models）
+#     來源：https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
+#           原始模型 https://github.com/Gilgamesh-J/X-ASR
+#     檔案：models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05/
+#           encoder / joiner 為 INT8、decoder 為 FP32（合計約 161 MB），另含 tokens.txt、bpe.model、test_wavs/
 
 set -euo pipefail
 
 usage() {
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 FORCE=0
@@ -58,10 +72,44 @@ fetch() {
     echo "  完成，sha256=$actual"
 }
 
+# fetch_archive <URL> <解壓後目錄名（相對 models/）> <壓縮檔預期 sha256>
+# 壓縮檔校驗通過才解壓；解壓完成後寫入 .sha256 標記並刪除壓縮檔，標記吻合即跳過。
+fetch_archive() {
+    local url="$1" name="$2" expected="$3"
+    local dir="$MODELS_DIR/$name" stamp="$MODELS_DIR/$name/.sha256"
+    if [[ $FORCE -eq 0 && -f "$stamp" && "$(cat "$stamp")" == "$expected" ]]; then
+        echo "已存在且校驗通過：$name/"
+        return
+    fi
+    local archive="$name.tar.bz2"
+    fetch "$url" "$archive" "$expected"
+    rm -rf "$dir"
+    echo "  解壓到 $name/"
+    tar -xjf "$MODELS_DIR/$archive" -C "$MODELS_DIR"
+    if [[ ! -d "$dir" ]]; then
+        echo "解壓後找不到目錄：$name/" >&2
+        exit 1
+    fi
+    echo "$expected" > "$stamp"
+    rm -f "$MODELS_DIR/$archive"
+}
+
 SILERO_VAD_VERSION="v6.2.3"
 fetch \
     "https://raw.githubusercontent.com/snakers4/silero-vad/${SILERO_VAD_VERSION}/src/silero_vad/data/silero_vad.onnx" \
     "silero-vad-${SILERO_VAD_VERSION}/silero_vad.onnx" \
     "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+
+ZIPFORMER_ZH_14M="sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23"
+fetch_archive \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${ZIPFORMER_ZH_14M}.tar.bz2" \
+    "$ZIPFORMER_ZH_14M" \
+    "2cbd71b640d9c37d3784f29367333a4577b0398b62e9deeed418170b081cba8b"
+
+X_ASR_480MS="sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05"
+fetch_archive \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${X_ASR_480MS}.tar.bz2" \
+    "$X_ASR_480MS" \
+    "14919f03b74d9001fc8f2689c2ab1ea42c436db269e8c809144492f41612bfff"
 
 echo "全部模型就緒：$MODELS_DIR"
