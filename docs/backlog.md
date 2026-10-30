@@ -8,7 +8,7 @@
 
 ## 建議處理順序
 
-1. **B6** X-ASR 訓練資料與授權（工作量小，決定 5.07% 能不能當結論）
+1. **B13** 公開前替換 macOS 系統語音產生的測試 fixture（要公開 repo 時才必要）
 2. **B5 + B4 + B3** 評測可信度：合成長音訊集、與 VAD 無關的首字起點、真實尾字延遲（之後所有優化都靠它驗證）
 3. **B1** 首字延遲：X-ASR 160 ms 對比；接著 **B2** VAD 預先啟動
 4. **B9** 斷句改由 ASR endpoint 判斷（在 B4 的長音訊集上驗證）
@@ -59,10 +59,10 @@
 - **做法**：改用與 VAD 無關的參考起點。B4 合成音訊中句子的位置精確已知；單句集可用能量法或強制對齊估計起音。保留 VAD 起點當作輔助欄位。
 - **完成標準**：docs/eval.md 的定義更新，並報告兩種起點的差距分佈。
 
-### B6　X-ASR 訓練資料與授權不明（P0，工作量小）
+### B6a　評測集與任何模型訓練資料都不重疊（P1，原 B6 的後續）
 
-- **現況**：若訓練資料包含 AISHELL-1，5.07% 是同領域成績、不代表泛化能力；若包含 test，則有資料洩漏。授權不明也影響能否在作品集中散布。
-- **做法**：查 https://github.com/Gilgamesh-J/X-ASR 與 sherpa-onnx 的模型說明，結論寫進 download_models.sh 的註解與 progress.md。查不到時，在 README 指標表註明。
+- **現況**：B6 查證結果（[models.md](models.md)）：X-ASR 是否用過 AISHELL-1 train / test **未知**，官方只說「約 100 萬小時開源及收集語音」。AISHELL-1 上的 X-ASR CER 無法當作泛化能力。
+- **做法**：B4 的合成長音訊集改用自錄句子（或其他確定不在訓練資料中的語料）為來源，作為「保證跨領域」的評測集。X-ASR 技術報告（README 標示 Coming Soon）公布後再查一次訓練資料清單。
 
 ### B7　第一階段缺少 FP32 基準（P1）
 
@@ -73,7 +73,7 @@
 
 - 多執行緒 RTF（CLAUDE.md 要求另報）。
 - X-ASR 參數量（可用 `onnx` 套件統計 initializer）。
-- 200 句的 CER 95% 信賴區間約 ±1.1 個百分點；需要更細的比較時，擴大到 1000 句或全部 7176 句。
+- 正式評測集已改為 3000 句（CER 信賴區間以句重抽約 ±0.27 個百分點，X-ASR）。VAD / pre-roll 掃描仍是 200 句子集上的結果，之後的參數選擇要在 3000 句集上重做。
 - 評測音訊來自第三方鏡像（`shenyunhang/AISHELL-1`），無法對官方 checksum 驗證。
 - 只在一台 Apple M5 Mac、CPU 上驗證過；其他 Apple Silicon 機型的數字未知。
 
@@ -98,8 +98,12 @@
 
 ### B11　記憶體與模型體積偏重（P1）
 
-- **現況**：X-ASR 峰值 RSS 533 MB。模型檔 164 MB，但載入後 RSS 增加約 450 MB，多出的部分可能是 ONNX Runtime 的記憶體配置（arena）或權重解壓。模型 163.6 MB 對 iOS app 也偏大，對 iPhone 端側部署是明顯風險。
-- **做法**：查 sherpa-onnx / ORT 的 arena 設定；第二階段量化與 Core ML 轉換時一併對比記憶體與體積。
+- **現況**：模型 163.6 MB 對 iOS app 也偏大，對 iPhone 端側部署是明顯風險。2026-10-30 用 `scripts/probe_memory.py` 查過（細節見 progress.md）：
+  - 直譯器啟動 21 MB、import numpy / sherpa-onnx 後 38 MB；X-ASR 載入後 472 MB（**載入增加約 435 MB**），解碼 1000 句後 491 MB。增加幾乎全在載入階段。
+  - `EnableCpuMemArena=0`（經 sherpa-onnx provider 設定檔）：載入與峰值都在 ±1 MB 內，**無效**。關 prepacking 只少約 7 MB；關圖最佳化反而多 144 MB。
+  - 同樣三個檔案直接用 onnxruntime Python 載入，只增加約 245 MB（encoder 148 MB 檔案 → +217–222 MB）。經 sherpa-onnx 載入多出的約 190 MB 是下一個要查的對象（推測：sherpa-onnx 先把檔案讀進記憶體再建 session，緩衝未釋放；**未驗證**）。
+  - 評測時峰值 RSS 隨句數增加（X-ASR 200 句 531 MB → 3000 句 618 MB；zh-14M 252 → 333 MB），但單獨解碼 100 → 1000 句只增加 3 MB，增加的部分在評測 / pipeline 端，原因未查。這讓「峰值 RSS」指標混入了評測框架本身，違背 CLAUDE.md 的量測原則。
+- **做法**：(1) 以 C++ 或 sherpa-onnx C API 對照載入，確認多出的 190 MB 來源；(2) 在 worker 中每 N 句取樣 RSS，找出評測端的增長來源並修正，讓峰值 RSS 與句數無關；(3) 第二階段量化與 Core ML 轉換時一併對比記憶體與體積。
 
 ---
 
@@ -109,7 +113,13 @@
 
 - 沒有 CI 自動跑 pytest / mypy / ruff。
 - 專案沒有安裝成套件，`scripts/` 與 `eval/run_eval.py` 都靠 `sys.path.insert` 才能 import `src`。根治要改成可安裝套件（頂層名稱 `src` 需改名），改動面大。
-- 沒有 git remote，README 的 `<repo-url>` 待補；License 未定（X-ASR 授權見 B6）。
+- 沒有 git remote，README 的 `<repo-url>` 待補；本專案自己的 License 未定（第三方授權已查清，見 [models.md](models.md)）。
+
+### B13　公開前替換測試 fixture（P1，公開 repo 前必做）
+
+- **現況**：`tests/fixtures/vad_two_utterances.wav` 由 macOS `say`（Tingting）合成，自 `ea86c17` 起已在 git 歷史中。macOS 軟體授權第 2 條 F 款排除在公開分享情境中發布或散布系統語音，公開 GitHub repo 屬於此情境。
+- **做法**：改用自錄音訊或 AISHELL-1 句子（Apache-2.0，附來源）重做 fixture 與 JSON 標註，更新 `make_vad_fixture.py`；公開前改寫歷史或另開乾淨的公開 repo。同時新增 LICENSE、補上 `<repo-url>`。
+- **完成標準**：git 歷史中沒有系統語音產生的音訊，`uv run pytest` 全部通過。
 
 ---
 
@@ -118,3 +128,5 @@
 - 2026-10-30　VAD `min_silence_ms` 100 → 500、pre-roll 維持 100（AISHELL-1 掃描，見 progress.md）。
 - 2026-10-30　麥克風輸入 `scripts/demo_mic.py`（原 B0 的 demo 部分，真實延遲量測留在 B0）。
 - 2026-10-30　第一階段整理：腳本錯誤處理、共用 CLI 參數與常數、`ruff format` 全部通過（見 progress.md）。
+- 2026-10-30　**B6** X-ASR / zh-14M 訓練資料與授權查證，寫進 [models.md](models.md) 與 `download_models.sh` 註解；公開散布的授權評估（可公開，唯一阻礙見 B13）。
+- 2026-10-30　正式評測集改為 AISHELL-1 test 隨機 3000 句，CER 報告 95% bootstrap 信賴區間（以句 / 以說話人）；200 句子集保留為 `--smoke`（原 B8 的一項）。

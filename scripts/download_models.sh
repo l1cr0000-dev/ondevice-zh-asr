@@ -3,7 +3,8 @@
 #
 # 用法：bash scripts/download_models.sh [--force]
 #
-# 模型清單（來源與版本固定在下方，升版時同步更新 URL、版本與 checksum）：
+# 模型清單（來源與版本固定在下方，升版時同步更新 URL、版本與 checksum）。
+# 訓練資料與授權的查證細節與來源連結見 docs/models.md。
 #
 #   Silero VAD
 #     版本：v6.2.3（git tag，commit 5cd7945676）
@@ -14,21 +15,23 @@
 #   串流 Zipformer transducer（中文，14M 參數）
 #     版本：sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23（sherpa-onnx release tag asr-models）
 #     來源：https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
-#     訓練資料：WenetSpeech；授權：Apache-2.0
+#     訓練資料：WenetSpeech（sherpa-onnx / sherpa-ncnn 文件；依文件不含 AISHELL-1）；授權：Apache-2.0
 #     檔案：models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23/
 #           encoder/decoder/joiner 各有 FP32（約 53 MB）與 INT8（約 24 MB）兩版，另含 tokens.txt、test_wavs/
 #
 #   X-ASR 串流 Zipformer transducer（中英，480 ms chunk，官方 INT8 版）
 #     版本：sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05（release tag asr-models）
 #     來源：https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
-#           原始模型 https://github.com/Gilgamesh-J/X-ASR
+#           原始模型 https://github.com/Gilgamesh-J/X-ASR（查證時 commit 838297cd47）
+#     訓練資料：約 100 萬小時「開源及收集」語音，資料集清單未公開；是否含 AISHELL-1 train / test 未知
+#     授權：Apache-2.0（repo LICENSE 與 Hugging Face 模型卡；壓縮檔內沒有附 LICENSE）
 #     檔案：models/sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05/
 #           encoder / joiner 為 INT8、decoder 為 FP32（合計約 161 MB），另含 tokens.txt、bpe.model、test_wavs/
 
 set -euo pipefail
 
 usage() {
-    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 FORCE=0
