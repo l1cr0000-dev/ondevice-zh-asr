@@ -1,0 +1,16 @@
+{
+  "voice": "Tingting",
+  "sample_rate": 16000,
+  "segments": [
+    {
+      "text": "今天天氣很好",
+      "start": 1.0,
+      "end": 2.592
+    },
+    {
+      "text": "我們去公園散步吧",
+      "start": 3.592,
+      "end": 5.212625
+    }
+  ]
+}
