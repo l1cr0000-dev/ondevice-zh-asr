@@ -4,7 +4,15 @@ version = "0.1.0"
 description = "Apple 設備上的離線、低延遲端側中文串流語音辨識全鏈路"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
-dependencies = []
+dependencies = [
+    "jiwer>=4.0.0",
+    "numpy>=2.4.6",
+    "onnxruntime>=1.31.1",
+    "psutil>=7.2.2",
+    "sherpa-onnx>=2.0.1",
+    "sounddevice>=0.5.6",
+    "soundfile>=0.14.0",
+]
 
 [dependency-groups]
 dev = [
@@ -20,8 +28,7 @@ pythonpath = ["."]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-# scripts/ 有 .py 檔後加回來
-files = ["src", "eval", "tests"]
+files = ["src", "eval", "scripts", "tests"]
 
 [tool.ruff]
 line-length = 100

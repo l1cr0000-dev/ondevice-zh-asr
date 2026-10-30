@@ -82,6 +82,7 @@
 
 ```bash
 uv sync                 # 安裝依賴
+uv run scripts/check_env.py  # 環境檢查（套件版本、ORT providers、麥克風）
 uv run pytest           # 跑測試
 uv run mypy             # 型別檢查
 uv run ruff check .     # lint

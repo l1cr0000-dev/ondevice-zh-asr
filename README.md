@@ -25,13 +25,18 @@ flowchart LR
 需求：Apple Silicon Mac、[uv](https://docs.astral.sh/uv/)。
 
 ```bash
-uv sync                                   # 安裝依賴（含 Python 3.11）
+git clone <repo-url> && cd ondevice-zh-asr
+uv sync                                   # 安裝依賴（uv 會自動下載 Python 3.11）
+uv run scripts/check_env.py               # 檢查環境：套件版本、ONNX Runtime providers、麥克風
 uv run pytest                             # 跑測試
 ```
 
+`check_env.py` 最後一行印出 `OK` 就代表環境可用；只要有任何一項失敗，它會以非零狀態碼結束。預期看到的 ONNX Runtime providers 有 `CoreMLExecutionProvider` 和 `CPUExecutionProvider`。
+
+已驗證的環境：Apple M5 / macOS 27.0.1 / Python 3.11.15 / onnxruntime 1.31.1 / sherpa-onnx 2.0.1。
+
 ```bash
-# TODO：以下命令尚未實作
-uv run scripts/download_models.py         # 下載模型到 models/
+# TODO：以下命令尚未實作（模型下載會在實作 VAD 時一起完成）
 uv run scripts/transcribe.py input.wav    # 辨識單一 wav
 uv run scripts/mic_demo.py                # 麥克風即時辨識
 uv run scripts/run_eval.py                # 在評測集上產生指標
