@@ -5,6 +5,12 @@ pre-roll：VAD 的「開始」事件要等語音持續 min_speech_ms 才發出�
 speech_pad_ms）也可能切在首字的弱起音上。因此 pipeline 保留最近一段音訊，建立 stream 時從
 `事件位置 - pre_roll_ms` 開始送入 ASR；但不早於上一句已送入 ASR 的終點，避免同一段音訊辨識兩次。
 
+暫定結果（`VadConfig.pause_ms` 有設定時）：句中靜音滿 pause_ms，VAD 發出停頓事件，pipeline 另開一個 ASR stream，
+把這句目前為止送入的全部音訊重新解碼並 finalize，輸出暫定結果；原 stream 不中斷。之後若又開始說話，同一句
+繼續送入原 stream，最終結果會取代（修正）暫定結果；若靜音滿 min_silence_ms，照常 finalize 原 stream 定稿。
+因此最終結果的斷句由較長的 min_silence_ms 決定（少切碎），使用者則在 pause_ms 後就先看到結果。
+（另開 stream 是因為串流 ASR 的狀態無法複製；代價是重新解碼的計算量與句長成正比。）
+
 時間記錄（全部以秒為單位、以音訊開頭為 0）分兩類：
 - 音訊時間軸上的位置：`speech_start_s`、`speech_end_s`、`audio_start_s`。
 - 「模擬即時」的發出時刻：`*_emitted_s`。假設音訊依實際時長節奏到達，一個 chunk 要等最後一個
@@ -51,6 +57,13 @@ class Partial:
     text: str
 
 
+@dataclass(frozen=True)
+class Provisional:
+    emitted_s: float  # 暫定結果可用的時刻（含重新解碼的計算時間）
+    audio_end_s: float  # 重新解碼涵蓋到的音訊終點（停頓事件發出時已送入的位置）
+    text: str
+
+
 @dataclass
 class Utterance:
     """一句話的結果。`*_s` 的意義見模組說明。"""
@@ -67,6 +80,7 @@ class Utterance:
     final_s: float | None = None  # finalize 完成、最終文字可用的時刻
     text: str = ""
     partials: list[Partial] = field(default_factory=list)
+    provisionals: list[Provisional] = field(default_factory=list)
 
     @property
     def first_token_latency_s(self) -> float | None:
@@ -96,7 +110,7 @@ class Utterance:
 
 @dataclass(frozen=True)
 class PipelineEvent:
-    kind: Literal["start", "partial", "final"]
+    kind: Literal["start", "partial", "provisional", "final"]
     utterance: Utterance
 
 
@@ -169,6 +183,9 @@ class StreamingPipeline:
         self._stream: AsrStream | None = None
         self._current: Utterance | None = None
         self._fed_until = 0  # 目前 / 上一句已送入 ASR 的終點（絕對樣本索引）
+        self._utt_audio: list[
+            npt.NDArray[np.float32]
+        ] = []  # 這句已送入 ASR 的音訊（暫定結果重新解碼用）
         self.utterances: list[Utterance] = []
 
     @property
@@ -214,6 +231,9 @@ class StreamingPipeline:
             if ev.kind == "start":
                 events.append(self._start(ev))
                 events.extend(self._feed(ev.detected_at))
+            elif ev.kind == "pause":
+                events.extend(self._feed(ev.detected_at))
+                events.append(self._provisional())
             else:
                 events.extend(self._feed(ev.detected_at))
                 events.append(self._finish(ev))
@@ -237,7 +257,10 @@ class StreamingPipeline:
         stream, utt = self._stream, self._current
         if stream is None or utt is None or until <= self._fed_until:
             return []
-        stream.accept_waveform(self._history.slice(self._fed_until, until))
+        audio = self._history.slice(self._fed_until, until)
+        stream.accept_waveform(audio)
+        if self.config.vad.pause_ms is not None:
+            self._utt_audio.append(audio.copy())
         self._fed_until = until
         text = stream.get_partial_result()
         last = utt.partials[-1].text if utt.partials else ""
@@ -256,6 +279,15 @@ class StreamingPipeline:
         stamps = stream.get_token_timestamps()
         return utt.audio_start_s + stamps[0] if stamps else None
 
+    def _provisional(self) -> PipelineEvent:
+        utt = self._current
+        assert utt is not None, "停頓事件只在語音段中發出"
+        stream = self.asr.create_stream()
+        stream.accept_waveform(np.concatenate(self._utt_audio))
+        text = stream.finalize()
+        utt.provisionals.append(Provisional(self._elapsed(), self._fed_until / SAMPLE_RATE, text))
+        return PipelineEvent("provisional", utt)
+
     def _finish(self, ev: VadEvent) -> PipelineEvent:
         stream, utt = self._stream, self._current
         assert stream is not None and utt is not None, "VAD 事件應成對出現"
@@ -269,5 +301,6 @@ class StreamingPipeline:
             utt.first_token_audio_s = self._first_token_audio_s(stream, utt)
         self._stream = None
         self._current = None
+        self._utt_audio = []
         self.utterances.append(utt)
         return PipelineEvent("final", utt)

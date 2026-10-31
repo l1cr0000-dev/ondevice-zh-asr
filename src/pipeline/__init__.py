@@ -14,6 +14,7 @@ from src.pipeline.pipeline import (
     Partial,
     PipelineConfig,
     PipelineEvent,
+    Provisional,
     StreamingPipeline,
     Utterance,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "Partial",
     "PipelineConfig",
     "PipelineEvent",
+    "Provisional",
     "StreamingPipeline",
     "Utterance",
     "transcribe",

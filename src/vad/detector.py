@@ -8,6 +8,9 @@
 - 語音段（含其中的短靜音）總長滿 min_speech_ms 才確認開始；不足的直接丟棄。
 - 輸出的起點往前、終點往後各延伸 speech_pad_ms，但不跨越前一段的終點、也不超出音訊範圍。
 
+- 選用 `pause_ms`（< min_silence_ms）：語音段中靜音滿 pause_ms 時發出一次「停頓」事件（不結束語音段），
+  之後要再出現語音 frame 才會再發。給 pipeline 提早產生暫定結果用；離線切段忽略它。
+
 因此串流的「開始」事件最早在語音起點後 min_speech_ms 才發出，「結束」事件在語音終點後
 min_silence_ms 才發出。事件的 `sample` 是時間軸上的位置，`detected_at` 是發出事件時已送入的樣本數，
 兩者之差就是 VAD 本身造成的延遲。
@@ -42,6 +45,7 @@ class VadConfig:
     min_speech_ms: int = 250
     min_silence_ms: int = 100
     speech_pad_ms: int = 30
+    pause_ms: int | None = None  # 停頓事件的靜音長度；None = 不發停頓事件
 
     def __post_init__(self) -> None:
         if not 0.0 < self.threshold < 1.0:
@@ -50,6 +54,8 @@ class VadConfig:
             raise ValueError("neg_threshold 必須在 (0, threshold] 內")
         if min(self.min_speech_ms, self.min_silence_ms, self.speech_pad_ms) < 0:
             raise ValueError("時間長度參數不可為負")
+        if self.pause_ms is not None and not 0 < self.pause_ms < self.min_silence_ms:
+            raise ValueError(f"pause_ms 必須在 (0, min_silence_ms) 內，收到 {self.pause_ms}")
 
     @property
     def effective_neg_threshold(self) -> float:
@@ -60,8 +66,8 @@ class VadConfig:
 
 @dataclass(frozen=True)
 class VadEvent:
-    kind: Literal["start", "end"]
-    sample: int  # 事件在音訊時間軸上的位置（已含 padding）
+    kind: Literal["start", "pause", "end"]
+    sample: int  # 事件在音訊時間軸上的位置（已含 padding；停頓事件為停頓起點 + padding）
     detected_at: int  # 發出事件時已送入的樣本數
 
     @property
@@ -107,6 +113,8 @@ class StreamingVad:
         self._min_speech = _ms_to_samples(self.config.min_speech_ms)
         self._min_silence = _ms_to_samples(self.config.min_silence_ms)
         self._pad = _ms_to_samples(self.config.speech_pad_ms)
+        pause = self.config.pause_ms
+        self._pause = None if pause is None else _ms_to_samples(pause)
         self._neg_threshold = self.config.effective_neg_threshold
         self.reset()
 
@@ -119,6 +127,7 @@ class StreamingVad:
         self._speech_start = 0  # 目前（候選）語音段的起點，未加 padding
         self._last_speech_end = 0  # 最後一個語音 frame 的終點
         self._prev_end = 0  # 上一段輸出的終點（已加 padding），避免段落重疊
+        self._paused = False  # 這次停頓已發過停頓事件
         self.last_prob = 0.0
 
     def accept_waveform(self, chunk: npt.NDArray[np.floating]) -> list[VadEvent]:
@@ -179,8 +188,17 @@ class StreamingVad:
             # 語音 frame，或遲滯區間內：延續目前的語音（候選）段
             if is_speech:
                 self._last_speech_end = frame_end
+                self._paused = False
         else:
             silence = frame_end - self._last_speech_end
+            if (
+                self._state is _State.SPEECH
+                and self._pause is not None
+                and not self._paused
+                and self._pause <= silence < self._min_silence
+            ):
+                self._paused = True
+                yield VadEvent("pause", self._last_speech_end + self._pad, detected_at)
             if silence >= self._min_silence:
                 if self._state is _State.SPEECH:
                     # padding 不超過已收到的音訊（speech_pad_ms > min_silence_ms 時才會被截）
@@ -203,7 +221,7 @@ def events_to_segments(events: list[VadEvent]) -> list[SpeechSegment]:
     for ev in events:
         if ev.kind == "start":
             start = ev.sample
-        elif start is not None:
+        elif ev.kind == "end" and start is not None:
             segments.append(SpeechSegment(start, ev.sample))
             start = None
     return segments

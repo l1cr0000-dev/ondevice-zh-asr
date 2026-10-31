@@ -165,6 +165,29 @@ def test_final_text_ready_is_first_partial_equal_to_final() -> None:
     assert utt.final_text_ready_s == 3.0
 
 
+def test_provisional_redecodes_utterance_and_final_spans_pause() -> None:
+    # 1.0–2.0 s 說話，停 0.4 s，2.4–3.0 s 再說：pause 200 ms 先給暫定結果，min_silence 600 ms 不切開
+    audio = _tones((1.0, 2.0), (2.4, 3.0), total_s=4.5)
+    config = PipelineConfig(VadConfig(min_silence_ms=600, pause_ms=200, speech_pad_ms=0))
+    (utt,), asr = _run_fake(audio, config)
+    main, *redecoded = asr.streams
+    assert len(utt.provisionals) == len(redecoded) == 2
+    first, last = utt.provisionals
+    # 第一個暫定結果：停頓 200 ms 後（frame 對齊），重新解碼目前為止送入的全部音訊，只含前半句
+    assert 2.2 <= first.audio_end_s <= 2.25 and first.emitted_s == pytest.approx(first.audio_end_s)
+    np.testing.assert_array_equal(redecoded[0].audio, main.audio[: len(redecoded[0].audio)])
+    assert first.text == "字" * 10 + "。"
+    # 最後一個暫定結果涵蓋整句，與最終結果相同，且早於最終結果
+    assert last.text == utt.text == "字" * 16 + "。"
+    assert utt.final_s is not None and last.emitted_s < utt.final_s
+
+
+def test_no_provisional_without_pause_ms() -> None:
+    audio = _tones((1.0, 2.0), total_s=3.0)
+    (utt,), asr = _run_fake(audio, PipelineConfig())
+    assert utt.provisionals == [] and len(asr.streams) == 1
+
+
 def test_first_token_audio_position_uses_stream_offset() -> None:
     audio = _tones((1.0, 2.0), total_s=3.0)
     (utt,), _ = _run_fake(audio, PipelineConfig())

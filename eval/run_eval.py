@@ -60,11 +60,14 @@ class RunConfig:
     blank_penalty: float = 0.0  # ASR 解碼的 blank penalty（0 = 不調整）
     # 每條音訊後補的數位靜音：句尾靜音夠長，VAD 才會以靜音計時（而非音訊結束）收尾，尾字延遲才不被截斷
     tail_silence_ms: int = 0
+    # VAD 停頓事件的靜音長度：滿此值先輸出暫定結果，滿 min_silence 才定稿（0 = 不用暫定結果）
+    pause_ms: int = 0
 
     @property
     def name(self) -> str:
         lead = f"_lead{self.lead_silence_ms}" if self.lead_silence_ms else ""
         lead += f"_tail{self.tail_silence_ms}" if self.tail_silence_ms else ""
+        lead += f"_pause{self.pause_ms}" if self.pause_ms else ""
         lead += f"_bp{self.blank_penalty:g}" if self.blank_penalty else ""
         return (
             f"{self.model}_sil{self.vad_min_silence_ms}_pre{self.pre_roll_ms}"
@@ -107,6 +110,7 @@ def worker(cfg: RunConfig, shard: int = 0, num_shards: int = 1) -> dict[str, Any
             min_speech_ms=cfg.vad_min_speech_ms,
             min_silence_ms=cfg.vad_min_silence_ms,
             speech_pad_ms=cfg.vad_speech_pad_ms,
+            pause_ms=cfg.pause_ms or None,
         ),
         pre_roll_ms=cfg.pre_roll_ms,
     )
@@ -172,6 +176,14 @@ def worker(cfg: RunConfig, shard: int = 0, num_shards: int = 1) -> dict[str, Any
                         "final_text_ready_s": shift(u.final_text_ready_s),
                         "final_s": shift(u.final_s),
                         "num_partials": len(u.partials),
+                        "provisionals": [
+                            {
+                                "emitted_s": p.emitted_s - lead_s,
+                                "audio_end_s": p.audio_end_s - lead_s,
+                                "text": p.text,
+                            }
+                            for p in u.provisionals
+                        ],
                     }
                     for u in utts
                 ],
@@ -307,6 +319,8 @@ def summarize_run(
         key = str(n) if n < 3 else "3+"
         seg_hist[key] = seg_hist.get(key, 0) + 1
 
+    from eval.segmentation import summarize_provisionals
+
     segmentation = None
     if utts and all("sentences" in u for u in utts):
         from eval.segmentation import summarize_segmentation
@@ -348,6 +362,7 @@ def summarize_run(
                 "histogram": dict(sorted(seg_hist.items())),
             },
             "segmentation": segmentation,
+            "provisional": summarize_provisionals(utts),
             "memory_mb": raw["memory_mb"],
             "model_size_mb": model_bytes / 2**20,
             "load_s": raw["load_s"],
@@ -500,6 +515,19 @@ def print_detail(res: dict[str, Any]) -> None:
         ("記憶體 (MB)", mem_s),
         ("模型大小 (MB)", f"{m['model_size_mb']:.1f}"),
     ]
+    pv = m.get("provisional")
+    if pv is not None:
+        rd = pv["redecode_ms"]
+        lines.append(
+            (
+                "暫定結果",
+                (
+                    f"{pv['provisionals']} 個（被取代 {pv['superseded']}），最後一個與最終結果相同 "
+                    f"{pv['last_matches_final'] * 100:.1f}%，重新解碼 mean {_fmt(rd['mean'])} / "
+                    f"P90 {_fmt(rd['p90'])} ms"
+                ),
+            )
+        )
     sg = m.get("segmentation")
     if sg is not None:
         by = sg["boundary_detected_by_pause"]
@@ -521,6 +549,13 @@ def print_detail(res: dict[str, Any]) -> None:
                 "  每句尾字 mean (ms)",
                 "  ".join(
                     f"{k}{'s' if k != 'end' else ''} {_fmt(v['mean'])}" for k, v in tails.items()
+                ),
+            ),
+            (
+                "  每句結果 mean (ms)",
+                "  ".join(
+                    f"{k}{'s' if k != 'end' else ''} {_fmt(v['mean'])}"
+                    for k, v in sg["result_latency_ms_by_pause"].items()
                 ),
             ),
             (
@@ -584,6 +619,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="並行的子程序數（每個仍是 --threads 執行緒）。設定數少於此值時把句子切成多份。"
         "> 1 時 CPU 互搶、可能排到效能核心以外，RTF 與峰值 RSS 不能當正式值；CER 不受影響",
     )
+    p.add_argument(
+        "--pause-ms",
+        type=non_negative_int,
+        nargs="+",
+        default=[0],
+        help="靜音滿此值先輸出暫定結果、滿 --min-silence-ms 才定稿（0 = 不用暫定結果；可給多個值掃描，"
+        "不小於 min_silence 的組合略過；非 0 時結果名稱加 _pause<值>）",
+    )
     p.add_argument("--tag", default="", help="掃描總表檔名的標籤")
     p.add_argument("--results-dir", type=Path, default=RESULTS_DIR, help="結果輸出目錄")
     return p.parse_args(argv)
@@ -635,15 +678,18 @@ def main() -> int:
             lead_silence_ms=args.lead_silence_ms,
             tail_silence_ms=args.tail_silence_ms,
             blank_penalty=bp,
+            pause_ms=pause,
         )
-        for model, threads, chunk, sil, pre, bp in itertools.product(
+        for model, threads, chunk, sil, pre, bp, pause in itertools.product(
             args.model,
             args.threads,
             args.chunk_ms,
             args.min_silence_ms,
             args.pre_roll_ms,
             args.blank_penalty,
+            args.pause_ms,
         )
+        if not pause or pause < sil
     ]
     env = environment()
     args.results_dir.mkdir(parents=True, exist_ok=True)

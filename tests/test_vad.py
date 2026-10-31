@@ -133,6 +133,25 @@ def test_min_speech_drops_short_burst() -> None:
     assert run(probs, VadConfig(min_speech_ms=150, **NO_PAD)) == [(5, 10)]
 
 
+def test_pause_event_once_per_pause_and_not_a_boundary() -> None:
+    # 兩次 128 ms 靜音（各發一次停頓事件），最後長靜音結束；停頓不影響切段
+    probs = [0.9] * 10 + [0.0] * 4 + [0.9] * 10 + [0.0] * 4 + [0.9] * 10 + [0.0] * 20
+    config = VadConfig(min_silence_ms=300, pause_ms=96, **NO_PAD)
+    audio = np.zeros(len(probs) * FRAME, dtype=np.float32)
+    vad = StreamingVad(ScriptedClassifier(probs), config)
+    events = vad.accept_waveform(audio) + vad.flush()
+    assert [e.kind for e in events] == ["start", "pause", "pause", "pause", "end"]
+    pauses = [e for e in events if e.kind == "pause"]
+    assert [e.sample // FRAME for e in pauses] == [10, 24, 38]  # 停頓起點
+    assert [e.detected_at // FRAME for e in pauses] == [13, 27, 41]  # 靜音滿 96 ms
+    assert run(probs, config) == run(probs, VadConfig(min_silence_ms=300, **NO_PAD)) == [(0, 38)]
+
+
+def test_pause_must_be_shorter_than_min_silence() -> None:
+    with pytest.raises(ValueError):
+        VadConfig(min_silence_ms=300, pause_ms=300)
+
+
 def test_min_silence_merges_short_gap() -> None:
     probs = [0.9] * 10 + [0.0] * 3 + [0.9] * 10 + [0.0] * 10  # 中間 96 ms 靜音
     assert run(probs, VadConfig(min_silence_ms=200, **NO_PAD)) == [(0, 23)]

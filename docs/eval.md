@@ -150,6 +150,18 @@ VAD 起點首字延遲的細節：
 | `tail_latency_ms_by_pause` | 每句的**真實尾字延遲**：真實末字結束 → 與它重疊的最後一個句段的最終結果。依這句之後的停頓分組，`end` 是每條最後一句。兩句被合併時前一句要等合併的句段結束，延遲包含下一句的長度，這就是合併的代價 |
 | `first_token_latency_true_onset_ms` | 每句的**真實首字延遲**：句子是句段的第一句時（沒有被併入前一句），句段首字出現時刻 → 真實首字起點。與 VAD 無關（B5） |
 
+### 暫定結果（`--pause-ms`）
+
+`--pause-ms N`（N < min_silence）開啟方案 A：靜音滿 N ms 先輸出暫定結果（重新解碼整句），滿 min_silence 才定稿（pipeline 模組說明）。結果 JSON 每個句段多 `provisionals`（`emitted_s`、`audio_end_s`、`text`），`metrics.provisional`：
+
+| 欄位 | 定義 |
+|---|---|
+| `provisionals` / `superseded` | 暫定結果總數 / 之後同一句段又開始說話、被最終結果取代的數量（文字通常是半句） |
+| `last_matches_final` | 句段最後一個暫定結果與最終結果文字相同的比例 |
+| `redecode_ms` | 暫定結果時刻 − 停頓事件時已送入的音訊終點，≈ 重新解碼的計算時間 |
+
+連續多句集另有 `segmentation.result_latency_ms_by_pause`：每句真實末字結束 → 第一個涵蓋整句的結果（暫定結果的 `audio_end_s` 不早於末字結束，或最終結果，取早者）。最終文字與同 min_silence 不開暫定結果時相同，CER 與斷句指標也相同。
+
 ### 峰值記憶體
 
 子程序結束前的 `resource.getrusage(RUSAGE_SELF).ru_maxrss`（macOS 單位是 bytes，Linux 是 KB，程式已分別換算），單位 MB。包含 Python 直譯器與 numpy / onnxruntime 本身；另記錄模型載入前與載入後的 RSS，兩者之差約等於模型佔用。

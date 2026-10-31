@@ -1,8 +1,10 @@
 """連續多句集的斷句指標：用手造的句段檢查合併、句中誤切、漏句與延遲的歸屬。"""
 
+from typing import Any
+
 import pytest
 
-from eval.segmentation import match_file, summarize_segmentation
+from eval.segmentation import match_file, summarize_provisionals, summarize_segmentation
 
 # 三句話：0–2 s、2.3–4 s（停頓 0.3 s）、5–6 s（停頓 1.0 s）
 SENTENCES = [
@@ -12,7 +14,7 @@ SENTENCES = [
 ]
 
 
-def _seg(start: float, end: float, final: float, first: float) -> dict[str, float]:
+def _seg(start: float, end: float, final: float, first: float) -> dict[str, Any]:
     return {
         "speech_start_s": start,
         "speech_end_s": end,
@@ -55,3 +57,25 @@ def test_split_inside_and_missed() -> None:
         "1": {"n": 1, "rate": 1.0},
     }
     assert list(s["tail_latency_ms_by_pause"]) == ["0.3", "1"]  # 最後一句漏掉，沒有尾字延遲
+
+
+def test_result_latency_uses_provisional_covering_the_sentence() -> None:
+    # 前兩句併成一段，但第一句結束後 0.3 s 的停頓產生了暫定結果：第一句的結果延遲取暫定結果
+    merged = _seg(-0.03, 4.03, 4.6, 1.0)
+    merged["text"] = "AB"
+    merged["provisionals"] = [
+        {"emitted_s": 1.0, "audio_end_s": 0.9, "text": "a"},  # 句中停頓，不涵蓋第一句
+        {"emitted_s": 2.25, "audio_end_s": 2.2, "text": "A"},
+        {"emitted_s": 4.4, "audio_end_s": 4.3, "text": "AB"},
+    ]
+    rows = match_file(SENTENCES[:2], [merged])
+    assert rows[0]["tail_latency_s"] == pytest.approx(2.6)
+    assert rows[0]["result_latency_s"] == pytest.approx(0.25)
+    assert rows[1]["result_latency_s"] == pytest.approx(0.4)
+
+    p = summarize_provisionals([{"segments": [merged, _seg(4.97, 6.03, 6.6, 6.0)]}])
+    assert p is not None
+    assert p["provisionals"] == 3 and p["superseded"] == 2 and p["segments_with_provisional"] == 1
+    assert p["last_matches_final"] == 1.0
+    assert p["redecode_ms"]["mean"] == pytest.approx(250 / 3)
+    assert summarize_provisionals([{"segments": [_seg(0.0, 1.0, 1.5, 0.5)]}]) is None

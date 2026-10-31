@@ -134,7 +134,7 @@ class Session:
             if text.strip() and utt.index not in self.first_token_wall:
                 self.first_token_wall[utt.index] = now
             self.writer.update(text or "…")
-        else:
+        elif ev.kind == "final":
             if not utt.text.strip():
                 self.writer.clear()  # 噪音觸發 VAD 但沒辨識出字，不算一句
                 return
