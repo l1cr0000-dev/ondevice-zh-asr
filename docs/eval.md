@@ -99,6 +99,7 @@ VAD 起點首字延遲的細節：
 - 報告平均與 P90（另存 P50 / P99），單位 ms。分位數用 numpy 線性內插。
 - `pre_roll_ms` 只改變送入 ASR 的起點，不改變上述起點，因此不同 pre-roll 的首字延遲可直接比較。
 - 端到端首字延遲取**同一個句段**（每條第一個有字的句段），樣本數相同。
+- 結果 JSON 每個句段另記 `first_token_audio_s`：ASR 後端回報的第一個 token 時間戳（sherpa-onnx 為 40 ms 解析度）換算到原始音訊時間軸，用於延遲拆解（[latency-analysis.md](latency-analysis.md)）。
 
 ### 尾字延遲（輔助）
 

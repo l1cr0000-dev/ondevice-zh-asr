@@ -1,5 +1,6 @@
 """sherpa-onnx 串流 transducer 後端（Zipformer 等）。"""
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -81,6 +82,12 @@ class SherpaTransducerStream(AsrStream):
 
     def _partial(self) -> str:
         return str(self._recognizer.get_result(self._stream))
+
+    def get_token_timestamps(self) -> list[float]:
+        # sherpa-onnx 以 encoder 輸出 frame 為單位（X-ASR / zh-14M 為 40 ms），
+        # 是 token 被輸出的那個 frame，不一定是該字的聲學起點
+        result = json.loads(self._recognizer.get_result_as_json_string(self._stream))
+        return [float(t) for t in result["timestamps"]]
 
     def _finalize(self) -> str:
         if len(self._tail_padding):

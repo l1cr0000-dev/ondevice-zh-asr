@@ -517,3 +517,76 @@ zh-14M（30 句）：default 與 no-arena 都是載入後 190、peak 193 MB（�
 - `tests/test_eval.py`：彙整的端到端首字延遲；端到端測試檢查 `lead_silence_ms`、檔名 `_lead1000`，以及端到端延遲大於 VAD 起點延遲。
 - `tests/test_asr.py`：`x-asr-160ms-int8` 加入真實模型測試（0.wav 1/28、1.wav 0/26）。
 - `uv run pytest` 94 passed、mypy strict、ruff 通過。
+
+### 追加：VAD 預先啟動的上限實驗（B2）
+
+問題：如果 VAD 一看到語音就建立 ASR stream（「預先啟動」），首字延遲最多能省多少？
+
+方法：`--min-speech-ms 0`，VAD 第一個語音 frame 就發出 start 事件。這相當於預先啟動且從不丟棄，是預先啟動在延遲上的上限，不需要改程式。200 句子集前 100 句，其他設定同上（sil 500、pre-roll 100、補靜音 1000 ms）。
+
+| 模型 | min_speech_ms | VAD 確認 mean (ms) | CER (%) | 首字（VAD 起點）mean / P90 (ms) | 端到端首字 mean / P90 (ms) | 每條切段數 | RTF |
+|---|---|---|---|---|---|---|---|
+| 160 ms | 250 | 291 | 4.59 | 848 / 1024 | 1368 / 1533 | 1.14 | 0.0695 |
+| 160 ms | 0 | 65 | 4.59 | 848 / 1024 | 1368 / 1533 | 1.14 | 0.0690 |
+| 480 ms | 250 | 291 | 4.59 | 1014 / 1029 | 1534 / 1623 | 1.14 | 0.0308 |
+| 480 ms | 0 | 65 | 4.59 | 1014 / 1029 | 1534 / 1623 | 1.14 | 0.0307 |
+
+- stream 平均提早 226 ms 建立，但兩個模型的首字延遲、CER、切段數**完全相同**（到 ms）。VAD 起點位置（含 pre-roll 的送入起點）不變，送進模型的音訊相同；第一個字輸出的時刻取決於音訊何時到達，與 stream 何時建立無關。
+- 結論：在 X-ASR 160 / 480 ms 上，VAD 預先啟動**不會降低首字延遲**，只會在誤觸發時多出計算量。AISHELL 是安靜環境的單句，本實驗量不到誤觸發；就算量到，也沒有延遲收益可以拿來抵。
+- 決定：不實作 B2。只有在換成首字確實卡在 VAD 的模型（start 事件當下即出字的比例明顯 > 0）時再重新評估。
+
+---
+
+## 2026-10-31　首字延遲拆解：字級對齊（B5 小規模版）
+
+完整的推論過程與結論見 [latency-analysis.md](latency-analysis.md)，這裡記錄做了什麼與數字。
+環境同上；評測在 commit `b7a1ac6` + 未提交的程式上執行，程式即本次提交的內容。
+
+### 量測檢查
+
+- partial 在每次送入音訊後讀一次（平常每 10 ms）。VAD 開始事件時會一次補送約 390 ms，補送完才讀。改成補送也每 10 ms 讀一次做對照（100 句、兩個模型）：首字時刻差 mean 0.04 / 0.06 ms、max 1.75 ms，沒有句子差超過 5 ms，首字也從未在補送當下出現。**不需修正。**
+- 首字時刻解析度：音訊到達以 chunk（10 ms）為單位，計算時間用 `perf_counter` 實測。
+
+### 做了什麼
+
+- `AsrStream.get_token_timestamps()`（預設 None）；sherpa-onnx 後端讀結果 JSON 的 `timestamps`（40 ms 解析度，以 stream 第一個樣本為 0）。pipeline 在第一個非空 partial 出現時記錄 `Utterance.first_token_audio_s`，評測結果每個句段新增 `first_token_audio_s`（原始音訊時間軸）。
+- `scripts/prepare_alignment.py`：從 3000 句集以 seed 20261031 抽 300 句（20 位說話人），以字為單位跑 MFA，輸出 `data/aishell1_align_300/`（manifest、`alignments.jsonl`、10 句抽查檔）。
+  - MFA 3.4.3（conda-forge，獨立 conda 環境 `mfa`，不進專案依賴）；Mandarin MFA acoustic v3.0.0（GMM-HMM，MFCC + pitch，frame shift 10 ms，fMLLR 說話人調適）、mandarin_china_mfa 詞典與 G2P，皆 CC BY 4.0。聲學模型訓練資料：Common Voice zh-CN / zh-TW v16.1、aidatatang_200zh、AISHELL-3、THCHS-30、GlobalPhone，**不含 AISHELL-1**（MFA models 文件）。
+  - 上游沒有公布 checksum，腳本固定 2026-10-31 下載時的 SHA-256。`mfa model download` 在不穩的網路下沒有重試，改用 curl 下載到 `models/mfa/`。
+  - `.lab` 逐字以空白分隔並加 `--no_tokenization`（否則 MFA 要另裝中文分詞套件）。300 句的 1051 個字都在詞典裡。
+  - 300 / 300 句對齊成功（全形「ｋ」被 MFA 轉成「k」，比對時兩邊做 NFKC + 小寫）。耗時 34 秒（4 個 job）。首字起點中位數 0.49 s，首字長度中位數 230 ms。
+- `scripts/latency_breakdown.py`：三段拆解、`docs/latency_breakdown.png`、數字存 `eval/results/<日期>_aishell1_align_300_breakdown.json`。
+
+### 300 句評測（含 token 時間戳）
+
+| 模型 | CER (%) [95% CI] | 首字（VAD 起點）mean / P90 | 端到端首字 mean / P90 | RTF |
+|---|---|---|---|---|
+| 480 ms | 3.72 [2.91, 4.58] | 973 / 1029 | 1485 / 1623 | 0.0302 |
+| 160 ms | 4.53 [3.66, 5.47] | 842 / 1023 | 1355 / 1589 | 0.0678 |
+
+與 3000 句的值一致（首字延遲差 < 10 ms）。
+
+### 拆解結果（mean / P50 / P90，ms）
+
+| 模型 | 句數 | ① VAD → 真實首字起點 | ② 真實起點 → 模型時間戳 | 首字結束 → 模型時間戳 | ③ 時間戳 → 首字出現 | 合計 |
+|---|---|---|---|---|---|---|
+| 480 ms | 283 | −26 / −18 / 2 | 432 / 418 / 563 | 190 / 188 / 292 | 561 / 606 / 648 | 966 / 1025 / 1029 |
+| 160 ms | 280 | −26 / −18 / 0 | 550 / 553 / 740 | 308 / 301 / 470 | 310 / 320 / 325 | 835 / 861 / 1023 |
+
+- 首字辨識錯（假設首字 ≠ 參考首字）的 17 / 20 句不計入。
+- ③ 對照架構推算：「時間戳所在 chunk 結尾 + 130 ms 右側 context − 時間戳」（送入起點以 VAD 起點 − 100 ms 近似），③ 只多出 31–34 ms（P10–P90 27–39 ms）。時間戳在 chunk 內的平均位置 84 ms（480）/ 12 ms（160）：模型幾乎總在下一個 chunk 開頭才輸出首字。
+
+### 結論
+
+- **主因是模型的輸出延遲（②）**：模型在首字唸完 190 / 308 ms 後才輸出它，chunk 越小越晚。VAD 切點準確（①）；③ 是 chunk + 右側 context 的架構成本，可完全解釋。
+- 換 160 ms：③ −251 ms、② +118 ms，淨 −131 ms，與 3000 句的 −128 ms 一致。
+- 推論端唯一直接針對 ② 的做法是 sherpa-onnx 的 `blank_penalty`（`from_transducer` 有此參數），下一步掃描它對 ② 與 CER 的影響。延遲懲罰訓練、FastEmit 等需重新訓練，不在第一階段範圍。
+
+### 待確認
+
+- **MFA 對齊的人工抽查**：`data/aishell1_align_300/check/` 的 10 句（`.TextGrid` 給 Praat，`.txt` 是 Audacity 標籤）。抽查前 MFA 邊界的誤差範圍未知。
+
+### 測試
+
+- `tests/test_pipeline.py`：假後端的 token 時間戳換算到音訊時間軸；真實模型的首字時間戳落在送入範圍內且不晚於首字出現時刻。
+- `uv run pytest` 95 passed、mypy strict、ruff 通過。

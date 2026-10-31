@@ -60,6 +60,9 @@ class _RecordingStream(AsrStream):
     def _finalize(self) -> str:
         return self._partial() + "。"
 
+    def get_token_timestamps(self) -> list[float]:
+        return [0.25] * len(self._partial())  # 固定值，檢查 pipeline 換算到音訊時間軸
+
 
 class _RecordingAsr(StreamingAsr):
     def __init__(self) -> None:
@@ -151,6 +154,12 @@ def test_timestamps_are_ordered_and_consistent() -> None:
     assert utts[0].final_s is not None and utts[0].final_s < utts[1].start_emitted_s
 
 
+def test_first_token_audio_position_uses_stream_offset() -> None:
+    audio = _tones((1.0, 2.0), total_s=3.0)
+    (utt,), _ = _run_fake(audio, PipelineConfig())
+    assert utt.first_token_audio_s == pytest.approx(utt.audio_start_s + 0.25)
+
+
 def test_compute_time_is_added_to_emitted_time() -> None:
     audio = _tones((1.0, 2.0), total_s=3.0)
     ticks = iter(np.arange(0, 1e6, 1e-3))  # 每呼叫一次 clock 前進 1 ms
@@ -221,6 +230,9 @@ def test_end_to_end_two_utterances(models: tuple[SileroVadModel, StreamingAsr]) 
         # 首字延遲：至少要等 VAD 確認 + ASR 第一個 chunk，但不該超過 1.5 s
         assert utt.first_token_latency_s is not None
         assert 0.3 < utt.first_token_latency_s < 1.5
+        # 模型回報的首字位置在送入的音訊範圍內，且不晚於首字實際出現的時刻
+        assert utt.first_token_audio_s is not None
+        assert utt.audio_start_s <= utt.first_token_audio_s <= utt.first_token_s
         # partial 不倒退，且最後一個 partial 是最終結果的前綴
         assert all(len(a.text) <= len(b.text) for a, b in pairwise(utt.partials))
         assert utt.text.startswith(utt.partials[-1].text)

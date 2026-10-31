@@ -60,6 +60,8 @@ class Utterance:
     audio_start_s: float  # 實際送入 ASR 的第一個樣本（含 pre-roll）
     start_emitted_s: float  # VAD 發出「開始」事件、建立 ASR stream 的時刻
     first_token_s: float | None = None  # 第一個非空 partial 出現的時刻
+    # 第一個 token 在音訊時間軸上的位置（ASR 後端回報的 token 時間戳）；後端不支援時為 None
+    first_token_audio_s: float | None = None
     speech_end_s: float | None = None  # VAD 終點（含 speech_pad_ms）
     end_emitted_s: float | None = None  # VAD 發出「結束」事件的時刻
     final_s: float | None = None  # finalize 完成、最終文字可用的時刻
@@ -234,7 +236,14 @@ class StreamingPipeline:
         utt.partials.append(Partial(now, text))
         if utt.first_token_s is None and text.strip():
             utt.first_token_s = now
+            utt.first_token_audio_s = self._first_token_audio_s(stream, utt)
         return [PipelineEvent("partial", utt)]
+
+    @staticmethod
+    def _first_token_audio_s(stream: AsrStream, utt: Utterance) -> float | None:
+        # 首字時刻已在呼叫前取得；讀時間戳的耗時計入之後的計算時間（每句只讀一次）
+        stamps = stream.get_token_timestamps()
+        return utt.audio_start_s + stamps[0] if stamps else None
 
     def _finish(self, ev: VadEvent) -> PipelineEvent:
         stream, utt = self._stream, self._current
@@ -246,6 +255,7 @@ class StreamingPipeline:
         if utt.first_token_s is None and utt.text.strip():
             # partial 一直為空、直到 finalize 才出字（例如語音很短）
             utt.first_token_s = utt.final_s
+            utt.first_token_audio_s = self._first_token_audio_s(stream, utt)
         self._stream = None
         self._current = None
         self.utterances.append(utt)

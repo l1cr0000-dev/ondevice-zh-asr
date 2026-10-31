@@ -56,6 +56,13 @@ class AsrStream(ABC):
         self._final = self._finalize()
         return self._final
 
+    def get_token_timestamps(self) -> list[float] | None:
+        """目前結果中每個 token 在此 stream 音訊中的位置（秒，以第一個送入的樣本為 0）。
+
+        用來拆解首字延遲：模型「認為」第一個字在音訊的哪裡。後端不支援時回傳 None。
+        """
+        return None
+
     @abstractmethod
     def _accept(self, chunk: npt.NDArray[np.float32]) -> None: ...
 

@@ -143,6 +143,11 @@ def worker(cfg: RunConfig) -> dict[str, Any]:
                         "e2e_first_token_latency_s": (
                             None if u.first_token_s is None else u.first_token_s - lead_s
                         ),
+                        "first_token_audio_s": (
+                            None
+                            if u.first_token_audio_s is None
+                            else u.first_token_audio_s - lead_s
+                        ),
                         "tail_latency_s": u.tail_latency_s,
                     }
                     for u in utts
