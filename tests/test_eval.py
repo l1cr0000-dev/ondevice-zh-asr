@@ -150,6 +150,11 @@ def _seg(text: str, ftl: float | None, tail: float | None) -> dict[str, object]:
     }
 
 
+def test_run_config_name_marks_non_default_options() -> None:
+    assert _cfg().name.endswith("_t1_lead1000")
+    assert RunConfig(**{**_cfg().__dict__, "blank_penalty": 2.0}).name.endswith("_lead1000_bp2")
+
+
 def test_summarize_run_latency_uses_first_segment_with_text() -> None:
     raw = {
         "asr_name": "fake",

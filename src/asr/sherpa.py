@@ -41,6 +41,9 @@ class SherpaTransducerConfig:
     # 這段補零是演算法的一部分，會計入尾字延遲的計算量。所需長度隨模型 chunk 大小而異，
     # 各模型的值在 `src.asr._REGISTRY` 設定；0.66 s 是 sherpa-onnx 官方範例的值。
     tail_padding_s: float = 0.66
+    # 解碼時從 blank 的 log 機率減去的值。> 0 讓模型較早輸出非 blank token，可能增加插入錯誤。
+    # 0 = 不調整（sherpa-onnx 預設）。見 docs/latency-analysis.md。
+    blank_penalty: float = 0.0
 
 
 ZIPFORMER_ZH_14M = TransducerFiles(
@@ -122,6 +125,7 @@ class SherpaTransducerAsr(StreamingAsr):
             sample_rate=SAMPLE_RATE,
             feature_dim=80,
             decoding_method=self.config.decoding_method,
+            blank_penalty=self.config.blank_penalty,
             enable_endpoint_detection=False,  # 斷句交給 VAD
             provider="cpu",
         )
@@ -131,6 +135,7 @@ class SherpaTransducerAsr(StreamingAsr):
         return (
             f"sherpa-onnx/{self.files.model_dir}/{self.files.encoder}"
             f" threads={self.config.num_threads} {self.config.decoding_method}"
+            + (f" blank_penalty={self.config.blank_penalty:g}" if self.config.blank_penalty else "")
         )
 
     def model_files(self) -> list[Path]:

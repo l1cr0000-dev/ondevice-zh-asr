@@ -15,7 +15,7 @@ import numpy.typing as npt
 import pytest
 
 from src.asr import SAMPLE_RATE, AsrStream, StreamingAsr, available_models, load_asr
-from src.asr.sherpa import ZIPFORMER_ZH_14M
+from src.asr.sherpa import ZIPFORMER_ZH_14M, SherpaTransducerAsr
 from src.paths import MODELS_DIR
 from src.vad import load_wav
 
@@ -124,6 +124,15 @@ def _transcribe(asr: StreamingAsr, wav: Path, chunk_ms: int = 100) -> str:
     for chunk in _chunks(load_wav(wav), chunk_ms):
         stream.accept_waveform(chunk)
     return stream.finalize()
+
+
+def test_blank_penalty_is_passed_to_backend() -> None:
+    if not TEST_WAVS.is_dir():
+        pytest.skip("模型未下載，請先執行 bash scripts/download_models.sh")
+    asr = load_asr("zipformer-zh-14m", num_threads=1, blank_penalty=1.5)
+    assert isinstance(asr, SherpaTransducerAsr) and asr.config.blank_penalty == 1.5
+    assert "blank_penalty=1.5" in asr.name
+    assert "blank_penalty" not in load_asr("zipformer-zh-14m", num_threads=1).name
 
 
 def test_14m_matches_official_output() -> None:

@@ -13,6 +13,7 @@ VAD Silero v6.2.3（min_speech 250 ms、min_silence 500 ms、pad 30 ms），pre-
 | 1. 換 160 ms chunk | 首字延遲少約 320 ms（480 − 160） | 只少 128 ms，CER +0.94 個百分點（顯著） | 預期錯，預設維持 480 ms |
 | 2. 新假設：VAD 確認（291 ms）露出來成為瓶頸 | VAD 預先啟動可省約 200 ms | VAD 確認 291 → 65 ms，首字延遲**完全不變** | 假設錯，瓶頸不在 VAD |
 | 3. 新假設：模型晚出字，原因三選一 | 用字級對齊拆成三段 | 模型把首字放在**首字唸完後 190–310 ms**；其餘是 chunk 等待 | 主因是模型的輸出延遲，chunk 變小反而延遲更多 |
+| 4. 推論端壓低輸出延遲：`blank_penalty` | 讓模型早點輸出 | penalty 2 省 40–47 ms（CER 不顯著）；penalty 4 省 150–180 ms 但 CER +0.9 個百分點 | 輸出延遲可移動，但要拿準確率換 |
 
 ![首字延遲拆解](latency_breakdown.png)
 
@@ -93,7 +94,7 @@ chunk 從 480 縮到 160 ms，③ 少了 251 ms，但 ② 多了 118 ms：chunk 
 
 | 做法 | 針對 | 預期與風險 |
 |---|---|---|
-| sherpa-onnx `blank_penalty`（解碼時降低 blank 的分數） | ② | 讓模型更早輸出非 blank token；可能增加插入錯誤。需要掃描 penalty，同時量 ② 與 CER |
+| sherpa-onnx `blank_penalty`（解碼時降低 blank 的分數） | ② | 已掃描（第 5 節）：penalty 2 省約 40 ms、CER 差異不顯著；penalty 4 省 150–180 ms、CER +0.9 個百分點 |
 | 從原始 checkpoint 重新匯出較小的右側 context 或 chunk | ③ | X-ASR 是 offline-streaming 統一模型；能否用原始 checkpoint 以其他 chunk / 右側 context 重新匯出，取決於 checkpoint 是否公開（未確認）。由本次結果，縮 chunk 會被 ② 抵銷 |
 | 換推論後端（Core ML / ANE） | 計算時間 | 計算只占 ③ 中約 30 ms 的一部分，幫助很小 |
 | VAD 預先啟動 | — | 已證實無效（第 2 節） |
@@ -106,7 +107,23 @@ chunk 從 480 縮到 160 ms，③ 少了 251 ms，但 ② 多了 118 ms：chunk 
 | 縮小右側 context 或用更小的 chunk 訓練 | ③ | 右側 context 130 ms 是固定成本 |
 | 對齊約束的 transducer 訓練（限制 token 只能在對齊位置附近輸出） | ② | 需要訓練資料的字級對齊 |
 
-**下一步建議**：先在推論端掃描 `blank_penalty`（例如 0 / 0.5 / 1.0 / 2.0），用這次的 300 句對齊集量 ② 與 CER 的取捨；這是唯一不需重新訓練、又直接針對主因的做法。
+## 5. 推論端的嘗試：blank_penalty
+
+在 300 句對齊集上掃描 sherpa-onnx 的 `blank_penalty`（0–8），完整數字見 [progress.md](progress.md)。
+
+![blank_penalty 取捨](blank_penalty_tradeoff.png)
+
+| 模型 | penalty | CER 差（成對，百分點）| 端到端首字差 | 首字結束 → 模型時間戳 |
+|---|---|---|---|---|
+| 480 ms | 2 | +0.12 [−0.28, +0.50] | −40 ms | 190 → 154 ms |
+| 480 ms | 4 | +0.86 [+0.31, +1.45] | −146 ms | 190 → 92 ms |
+| 160 ms | 2 | −0.12 [−0.50, +0.28] | −47 ms | 308 → 262 ms |
+| 160 ms | 4 | +0.88 [+0.32, +1.48] | −181 ms | 308 → 163 ms |
+
+- penalty 直接壓低 ②，證實拆解找到的主因是對的：輸出延遲可以用解碼參數移動。
+- 但不是免費的：penalty ≤ 2 只省 40–47 ms（CER 差異在 300 句上不顯著），penalty 4 省 150–180 ms 時 CER 顯著變差約 0.9 個百分點；penalty ≥ 6 時模型在首字唸完前就輸出，CER 失控。
+- 結論：模型晚出字有一部分是「需要聽到後文才能確定」的真實資訊需求，用解碼參數硬推只能拿準確率換延遲。要不付這個代價，需要在訓練時處理（延遲懲罰訓練等）。
+- 預設維持 penalty 0；penalty 2 待 3000 句確認 CER 不變後再決定。
 
 ## 限制
 

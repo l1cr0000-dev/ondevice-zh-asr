@@ -47,14 +47,17 @@ TRANSDUCER_SPECS: dict[str, tuple[TransducerFiles, float]] = {
 }
 
 
-def _transducer(name: str) -> Callable[[int], StreamingAsr]:
+def _transducer(name: str) -> Callable[[int, float], StreamingAsr]:
     files, tail_padding_s = TRANSDUCER_SPECS[name]
-    return lambda threads: SherpaTransducerAsr(
-        files, SherpaTransducerConfig(num_threads=threads, tail_padding_s=tail_padding_s)
+    return lambda threads, blank_penalty: SherpaTransducerAsr(
+        files,
+        SherpaTransducerConfig(
+            num_threads=threads, tail_padding_s=tail_padding_s, blank_penalty=blank_penalty
+        ),
     )
 
 
-_REGISTRY: dict[str, Callable[[int], StreamingAsr]] = {
+_REGISTRY: dict[str, Callable[[int, float], StreamingAsr]] = {
     name: _transducer(name) for name in TRANSDUCER_SPECS
 }
 
@@ -63,9 +66,11 @@ def available_models() -> list[str]:
     return sorted(_REGISTRY)
 
 
-def load_asr(name: str = DEFAULT_MODEL, num_threads: int = 1) -> StreamingAsr:
+def load_asr(
+    name: str = DEFAULT_MODEL, num_threads: int = 1, blank_penalty: float = 0.0
+) -> StreamingAsr:
     try:
         factory = _REGISTRY[name]
     except KeyError:
         raise ValueError(f"未知模型 {name!r}，可用：{', '.join(available_models())}") from None
-    return factory(num_threads)
+    return factory(num_threads, blank_penalty)

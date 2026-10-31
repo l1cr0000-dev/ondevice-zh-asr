@@ -186,8 +186,8 @@ def main() -> int:
         f"First-token latency breakdown, AISHELL-1 test {len(align)} utts (MFA), {'; '.join(env)}"
     )
     plot(out, args.out, title)
-    stats_file = (
-        args.results_dir / f"{date.today().isoformat()}_{args.align_dir.name}_breakdown.json"
+    stats_file = args.results_dir / (
+        f"{date.today().isoformat()}_{args.align_dir.name}_{args.config}_breakdown.json"
     )
     stats_file.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"\n圖：{args.out}\n數字：{stats_file}")

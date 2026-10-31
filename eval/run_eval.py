@@ -54,10 +54,12 @@ class RunConfig:
     vad_speech_pad_ms: int
     warmup: int
     lead_silence_ms: int = DEFAULT_LEAD_SILENCE_MS  # 每條音訊前補的數位靜音（端到端首字延遲的起點）
+    blank_penalty: float = 0.0  # ASR 解碼的 blank penalty（0 = 不調整）
 
     @property
     def name(self) -> str:
         lead = f"_lead{self.lead_silence_ms}" if self.lead_silence_ms else ""
+        lead += f"_bp{self.blank_penalty:g}" if self.blank_penalty else ""
         return (
             f"{self.model}_sil{self.vad_min_silence_ms}_pre{self.pre_roll_ms}"
             f"_chunk{self.chunk_ms}_t{self.threads}{lead}"
@@ -103,7 +105,7 @@ def worker(cfg: RunConfig) -> dict[str, Any]:
 
     t0 = time.perf_counter()
     vad_model = SileroVadModel(num_threads=cfg.threads)
-    asr = load_asr(cfg.model, num_threads=cfg.threads)
+    asr = load_asr(cfg.model, num_threads=cfg.threads, blank_penalty=cfg.blank_penalty)
     load_s = time.perf_counter() - t0
     rss_loaded = _rss_mb()
     files = [vad_model.model_path, *asr.model_files()]
@@ -351,8 +353,10 @@ def table_row(res: dict[str, Any]) -> str:
     c, m = res["config"], res["metrics"]
     ft, seg = m["first_token_latency_ms"], m["segments_per_utterance"]
     e2e = m.get("e2e_first_token_latency_ms") or {"mean": None, "p90": None}
+    bp = c.get("blank_penalty") or 0
+    model = f"{c['model']} bp={bp:g}" if bp else c["model"]
     return (
-        f"| {c['model']} | {c['vad_min_silence_ms']} | {c['pre_roll_ms']} "
+        f"| {model} | {c['vad_min_silence_ms']} | {c['pre_roll_ms']} "
         f"| {m['cer'] * 100:.2f} | {_ci(m['cer_ci95']['utterance'])} | {m['rtf']:.4f} "
         f"| {_fmt(ft['mean'])} / {_fmt(ft['p90'])} "
         f"| {_fmt(e2e['mean'])} / {_fmt(e2e['p90'])} "
@@ -450,6 +454,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_LEAD_SILENCE_MS,
         help="每條音訊前補的靜音長度；端到端首字延遲以補靜音的結束點為起點（0 = 不補，結果名稱不加 _lead）",
     )
+    p.add_argument(
+        "--blank-penalty",
+        type=float,
+        nargs="+",
+        default=[0.0],
+        help="ASR 解碼時從 blank 減去的分數（可給多個值掃描；非 0 時結果名稱加 _bp<值>）",
+    )
     p.add_argument("--tag", default="", help="掃描總表檔名的標籤")
     p.add_argument("--results-dir", type=Path, default=RESULTS_DIR, help="結果輸出目錄")
     return p.parse_args(argv)
@@ -499,9 +510,15 @@ def main() -> int:
             vad_speech_pad_ms=args.speech_pad_ms,
             warmup=args.warmup,
             lead_silence_ms=args.lead_silence_ms,
+            blank_penalty=bp,
         )
-        for model, threads, chunk, sil, pre in itertools.product(
-            args.model, args.threads, args.chunk_ms, args.min_silence_ms, args.pre_roll_ms
+        for model, threads, chunk, sil, pre, bp in itertools.product(
+            args.model,
+            args.threads,
+            args.chunk_ms,
+            args.min_silence_ms,
+            args.pre_roll_ms,
+            args.blank_penalty,
         )
     ]
     env = environment()
