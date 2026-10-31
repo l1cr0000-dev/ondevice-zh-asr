@@ -152,7 +152,7 @@ VAD 起點首字延遲的細節：
 
 ### 暫定結果（`--pause-ms`）
 
-`--pause-ms N`（N < min_silence）開啟方案 A：靜音滿 N ms 先輸出暫定結果（重新解碼整句），滿 min_silence 才定稿（pipeline 模組說明）。結果 JSON 每個句段多 `provisionals`（`emitted_s`、`audio_end_s`、`text`），`metrics.provisional`：
+`--provisional finalize` 改用方案 A2（停頓時 finalize 原 stream、恢復說話時才重新解碼，結果名稱加 `fin`），此時 `redecode_ms` 是補零 finalize 的耗時，`resume_redecode_ms` 是每次恢復時重新解碼的耗時。`--pause-ms N`（N < min_silence）開啟方案 A：靜音滿 N ms 先輸出暫定結果（重新解碼整句），滿 min_silence 才定稿（pipeline 模組說明）。結果 JSON 每個句段多 `provisionals`（`emitted_s`、`audio_end_s`、`text`），`metrics.provisional`：
 
 | 欄位 | 定義 |
 |---|---|

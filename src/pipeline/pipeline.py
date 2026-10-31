@@ -9,7 +9,12 @@ speech_pad_ms）也可能切在首字的弱起音上。因此 pipeline 保留最
 把這句目前為止送入的全部音訊重新解碼並 finalize，輸出暫定結果；原 stream 不中斷。之後若又開始說話，同一句
 繼續送入原 stream，最終結果會取代（修正）暫定結果；若靜音滿 min_silence_ms，照常 finalize 原 stream 定稿。
 因此最終結果的斷句由較長的 min_silence_ms 決定（少切碎），使用者則在 pause_ms 後就先看到結果。
-（另開 stream 是因為串流 ASR 的狀態無法複製；代價是重新解碼的計算量與句長成正比。）
+暫定結果有兩種做法（`PipelineConfig.provisional`）：
+- "redecode"：停頓時另開 stream 重新解碼整句（串流 ASR 的狀態無法複製），計算量與句長成正比，
+  加在暫定結果的延遲上。
+- "finalize"：停頓時直接 finalize 原 stream（只需補零解碼，約 40 ms），之後的音訊先緩衝；VAD 發出
+  「恢復」事件時才另開 stream 重新解碼整句並接手。重新解碼移到恢復說話時，只有恢復說話的句子要付，
+  代價是恢復後的 partial 晚一次重新解碼的時間。沒有恢復就以暫定結果定稿。
 
 時間記錄（全部以秒為單位、以音訊開頭為 0）分兩類：
 - 音訊時間軸上的位置：`speech_start_s`、`speech_end_s`、`audio_start_s`。
@@ -45,10 +50,14 @@ class PipelineConfig:
     # AISHELL-1 掃描：X-ASR 0 → 100 ms CER −0.8 個百分點，100 / 200 / 300 ms 無顯著差異；
     # 更長的 pre-roll 讓更多句子的首字要多等一個 480 ms chunk（P90 不穩），故取 100 ms。
     pre_roll_ms: int = 100
+    # 暫定結果的做法（只在 vad.pause_ms 有設定時有作用），見模組說明
+    provisional: Literal["redecode", "finalize"] = "redecode"
 
     def __post_init__(self) -> None:
         if self.pre_roll_ms < 0:
             raise ValueError("pre_roll_ms 不可為負")
+        if self.provisional not in ("redecode", "finalize"):
+            raise ValueError(f"provisional 必須是 redecode 或 finalize，收到 {self.provisional}")
 
 
 @dataclass(frozen=True)
@@ -81,6 +90,8 @@ class Utterance:
     text: str = ""
     partials: list[Partial] = field(default_factory=list)
     provisionals: list[Provisional] = field(default_factory=list)
+    # "finalize" 做法：每次恢復說話時重新解碼整句的計算時間（秒）
+    resume_redecode_s: list[float] = field(default_factory=list)
 
     @property
     def first_token_latency_s(self) -> float | None:
@@ -183,9 +194,9 @@ class StreamingPipeline:
         self._stream: AsrStream | None = None
         self._current: Utterance | None = None
         self._fed_until = 0  # 目前 / 上一句已送入 ASR 的終點（絕對樣本索引）
-        self._utt_audio: list[
-            npt.NDArray[np.float32]
-        ] = []  # 這句已送入 ASR 的音訊（暫定結果重新解碼用）
+        self._held = False  # "finalize" 做法：停頓時已 finalize 原 stream，等待恢復或結束
+        # 這句已送入 ASR 的音訊（暫定結果重新解碼用）
+        self._utt_audio: list[npt.NDArray[np.float32]] = []
         self.utterances: list[Utterance] = []
 
     @property
@@ -234,6 +245,9 @@ class StreamingPipeline:
             elif ev.kind == "pause":
                 events.extend(self._feed(ev.detected_at))
                 events.append(self._provisional())
+            elif ev.kind == "resume":
+                events.extend(self._feed(ev.detected_at))
+                events.extend(self._resume())
             else:
                 events.extend(self._feed(ev.detected_at))
                 events.append(self._finish(ev))
@@ -258,10 +272,15 @@ class StreamingPipeline:
         if stream is None or utt is None or until <= self._fed_until:
             return []
         audio = self._history.slice(self._fed_until, until)
-        stream.accept_waveform(audio)
         if self.config.vad.pause_ms is not None:
             self._utt_audio.append(audio.copy())
         self._fed_until = until
+        if self._held:
+            return []  # 原 stream 已 finalize，只緩衝，恢復說話時一起重新解碼
+        stream.accept_waveform(audio)
+        return self._emit_partial(stream, utt)
+
+    def _emit_partial(self, stream: AsrStream, utt: Utterance) -> list[PipelineEvent]:
         text = stream.get_partial_result()
         last = utt.partials[-1].text if utt.partials else ""
         if text == last:
@@ -281,19 +300,37 @@ class StreamingPipeline:
 
     def _provisional(self) -> PipelineEvent:
         utt = self._current
-        assert utt is not None, "停頓事件只在語音段中發出"
-        stream = self.asr.create_stream()
-        stream.accept_waveform(np.concatenate(self._utt_audio))
-        text = stream.finalize()
+        assert utt is not None and self._stream is not None, "停頓事件只在語音段中發出"
+        if self.config.provisional == "finalize":
+            text = self._stream.finalize()
+            self._held = True
+        else:
+            stream = self.asr.create_stream()
+            stream.accept_waveform(np.concatenate(self._utt_audio))
+            text = stream.finalize()
         utt.provisionals.append(Provisional(self._elapsed(), self._fed_until / SAMPLE_RATE, text))
         return PipelineEvent("provisional", utt)
+
+    def _resume(self) -> list[PipelineEvent]:
+        """ "finalize" 做法：恢復說話，另開 stream 重新解碼這句目前為止的全部音訊並接手。"""
+        utt = self._current
+        if not self._held or utt is None:
+            return []
+        t0 = self._elapsed()
+        stream = self.asr.create_stream()
+        stream.accept_waveform(np.concatenate(self._utt_audio))
+        self._stream = stream
+        self._held = False
+        utt.resume_redecode_s.append(self._elapsed() - t0)
+        return self._emit_partial(stream, utt)
 
     def _finish(self, ev: VadEvent) -> PipelineEvent:
         stream, utt = self._stream, self._current
         assert stream is not None and utt is not None, "VAD 事件應成對出現"
         utt.speech_end_s = ev.sample / SAMPLE_RATE
         utt.end_emitted_s = self._elapsed()
-        utt.text = stream.finalize()
+        # "finalize" 做法且停頓後沒有恢復：原 stream 已 finalize，以暫定結果定稿
+        utt.text = stream.get_partial_result() if stream.is_finalized else stream.finalize()
         utt.final_s = self._elapsed()
         if utt.first_token_s is None and utt.text.strip():
             # partial 一直為空、直到 finalize 才出字（例如語音很短）
@@ -301,6 +338,7 @@ class StreamingPipeline:
             utt.first_token_audio_s = self._first_token_audio_s(stream, utt)
         self._stream = None
         self._current = None
+        self._held = False
         self._utt_audio = []
         self.utterances.append(utt)
         return PipelineEvent("final", utt)

@@ -62,12 +62,14 @@ class RunConfig:
     tail_silence_ms: int = 0
     # VAD 停頓事件的靜音長度：滿此值先輸出暫定結果，滿 min_silence 才定稿（0 = 不用暫定結果）
     pause_ms: int = 0
+    provisional: str = "redecode"  # 暫定結果的做法：redecode / finalize（見 pipeline 模組說明）
 
     @property
     def name(self) -> str:
         lead = f"_lead{self.lead_silence_ms}" if self.lead_silence_ms else ""
         lead += f"_tail{self.tail_silence_ms}" if self.tail_silence_ms else ""
         lead += f"_pause{self.pause_ms}" if self.pause_ms else ""
+        lead += "fin" if self.pause_ms and self.provisional == "finalize" else ""
         lead += f"_bp{self.blank_penalty:g}" if self.blank_penalty else ""
         return (
             f"{self.model}_sil{self.vad_min_silence_ms}_pre{self.pre_roll_ms}"
@@ -113,6 +115,7 @@ def worker(cfg: RunConfig, shard: int = 0, num_shards: int = 1) -> dict[str, Any
             pause_ms=cfg.pause_ms or None,
         ),
         pre_roll_ms=cfg.pre_roll_ms,
+        provisional="finalize" if cfg.provisional == "finalize" else "redecode",
     )
 
     t0 = time.perf_counter()
@@ -184,6 +187,7 @@ def worker(cfg: RunConfig, shard: int = 0, num_shards: int = 1) -> dict[str, Any
                             }
                             for p in u.provisionals
                         ],
+                        "resume_redecode_s": u.resume_redecode_s,
                     }
                     for u in utts
                 ],
@@ -523,8 +527,10 @@ def print_detail(res: dict[str, Any]) -> None:
                 "暫定結果",
                 (
                     f"{pv['provisionals']} 個（被取代 {pv['superseded']}），最後一個與最終結果相同 "
-                    f"{pv['last_matches_final'] * 100:.1f}%，重新解碼 mean {_fmt(rd['mean'])} / "
-                    f"P90 {_fmt(rd['p90'])} ms"
+                    f"{pv['last_matches_final'] * 100:.1f}%，產生暫定結果 mean {_fmt(rd['mean'])} / "
+                    f"P90 {_fmt(rd['p90'])} ms，恢復時重新解碼 {pv['resume_redecode_ms']['n']} 次 "
+                    f"mean {_fmt(pv['resume_redecode_ms']['mean'])} / "
+                    f"P90 {_fmt(pv['resume_redecode_ms']['p90'])} ms"
                 ),
             )
         )
@@ -627,6 +633,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="靜音滿此值先輸出暫定結果、滿 --min-silence-ms 才定稿（0 = 不用暫定結果；可給多個值掃描，"
         "不小於 min_silence 的組合略過；非 0 時結果名稱加 _pause<值>）",
     )
+    p.add_argument(
+        "--provisional",
+        nargs="+",
+        choices=["redecode", "finalize"],
+        default=["redecode"],
+        help="暫定結果的做法（--pause-ms 非 0 時）：redecode 停頓時重新解碼整句；finalize 停頓時 "
+        "finalize 原 stream、恢復說話時才重新解碼（結果名稱加 fin）。可給多個值掃描",
+    )
     p.add_argument("--tag", default="", help="掃描總表檔名的標籤")
     p.add_argument("--results-dir", type=Path, default=RESULTS_DIR, help="結果輸出目錄")
     return p.parse_args(argv)
@@ -679,8 +693,9 @@ def main() -> int:
             tail_silence_ms=args.tail_silence_ms,
             blank_penalty=bp,
             pause_ms=pause,
+            provisional=mode,
         )
-        for model, threads, chunk, sil, pre, bp, pause in itertools.product(
+        for model, threads, chunk, sil, pre, bp, pause, mode in itertools.product(
             args.model,
             args.threads,
             args.chunk_ms,
@@ -688,8 +703,9 @@ def main() -> int:
             args.pre_roll_ms,
             args.blank_penalty,
             args.pause_ms,
+            args.provisional,
         )
-        if not pause or pause < sil
+        if (not pause and mode == "redecode") or (pause and pause < sil)
     ]
     env = environment()
     args.results_dir.mkdir(parents=True, exist_ok=True)

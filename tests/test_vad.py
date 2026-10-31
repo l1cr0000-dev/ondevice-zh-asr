@@ -140,7 +140,9 @@ def test_pause_event_once_per_pause_and_not_a_boundary() -> None:
     audio = np.zeros(len(probs) * FRAME, dtype=np.float32)
     vad = StreamingVad(ScriptedClassifier(probs), config)
     events = vad.accept_waveform(audio) + vad.flush()
-    assert [e.kind for e in events] == ["start", "pause", "pause", "pause", "end"]
+    kinds = [e.kind for e in events]
+    assert kinds == ["start", "pause", "resume", "pause", "resume", "pause", "end"]
+    assert [e.sample // FRAME for e in events if e.kind == "resume"] == [14, 28]  # 恢復語音的 frame
     pauses = [e for e in events if e.kind == "pause"]
     assert [e.sample // FRAME for e in pauses] == [10, 24, 38]  # 停頓起點
     assert [e.detected_at // FRAME for e in pauses] == [13, 27, 41]  # 靜音滿 96 ms

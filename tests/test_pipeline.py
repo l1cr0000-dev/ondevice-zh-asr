@@ -182,6 +182,33 @@ def test_provisional_redecodes_utterance_and_final_spans_pause() -> None:
     assert utt.final_s is not None and last.emitted_s < utt.final_s
 
 
+def test_finalize_mode_holds_then_redecodes_on_resume() -> None:
+    # 同上的音訊，"finalize" 做法：停頓時 finalize 原 stream，恢復說話時才另開 stream 重新解碼
+    audio = _tones((1.0, 2.0), (2.4, 3.0), total_s=4.5)
+    vad = VadConfig(min_silence_ms=600, pause_ms=200, speech_pad_ms=0)
+    (utt,), asr = _run_fake(audio, PipelineConfig(vad, provisional="finalize"))
+    held, resumed = asr.streams
+    assert held.is_finalized and len(utt.provisionals) == 2 and len(utt.resume_redecode_s) == 1
+    assert utt.provisionals[0].text == "字" * 10 + "。"
+    (ref,), ref_asr = _run_fake(
+        audio, PipelineConfig(VadConfig(min_silence_ms=600, speech_pad_ms=0))
+    )
+    # 接手的 stream 在最後的靜音又被 finalize（第二次停頓），所以收到的是參照的前段，且涵蓋恢復後的語音
+    assert resumed.is_finalized and len(resumed.audio) > len(held.audio)
+    np.testing.assert_array_equal(resumed.audio, ref_asr.streams[0].audio[: len(resumed.audio)])
+    assert utt.text == ref.text == "字" * 16 + "。"
+    assert utt.provisionals[-1].text == utt.text
+
+
+def test_finalize_mode_without_resume_keeps_provisional_as_final() -> None:
+    audio = _tones((1.0, 2.0), total_s=3.5)
+    vad = VadConfig(min_silence_ms=600, pause_ms=200, speech_pad_ms=0)
+    (utt,), asr = _run_fake(audio, PipelineConfig(vad, provisional="finalize"))
+    assert len(asr.streams) == 1 and utt.resume_redecode_s == []
+    (prov,) = utt.provisionals
+    assert utt.text == prov.text and utt.final_s is not None and prov.emitted_s < utt.final_s
+
+
 def test_no_provisional_without_pause_ms() -> None:
     audio = _tones((1.0, 2.0), total_s=3.0)
     (utt,), asr = _run_fake(audio, PipelineConfig())

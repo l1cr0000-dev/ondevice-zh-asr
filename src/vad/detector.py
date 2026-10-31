@@ -9,7 +9,8 @@
 - 輸出的起點往前、終點往後各延伸 speech_pad_ms，但不跨越前一段的終點、也不超出音訊範圍。
 
 - 選用 `pause_ms`（< min_silence_ms）：語音段中靜音滿 pause_ms 時發出一次「停頓」事件（不結束語音段），
-  之後要再出現語音 frame 才會再發。給 pipeline 提早產生暫定結果用；離線切段忽略它。
+  之後要再出現語音 frame 才會再發；停頓後再出現語音 frame 時發出「恢復」事件。給 pipeline 提早產生暫定結果用；
+  離線切段忽略這兩種事件。
 
 因此串流的「開始」事件最早在語音起點後 min_speech_ms 才發出，「結束」事件在語音終點後
 min_silence_ms 才發出。事件的 `sample` 是時間軸上的位置，`detected_at` 是發出事件時已送入的樣本數，
@@ -66,7 +67,7 @@ class VadConfig:
 
 @dataclass(frozen=True)
 class VadEvent:
-    kind: Literal["start", "pause", "end"]
+    kind: Literal["start", "pause", "resume", "end"]
     sample: int  # 事件在音訊時間軸上的位置（已含 padding；停頓事件為停頓起點 + padding）
     detected_at: int  # 發出事件時已送入的樣本數
 
@@ -166,6 +167,7 @@ class StreamingVad:
     def _end_event(self, end: int, detected_at: int) -> VadEvent:
         self._state = _State.SILENCE
         self._prev_end = end
+        self._paused = False
         return VadEvent("end", end, detected_at)
 
     def _step(self, frame: npt.NDArray[np.float32]) -> Iterator[VadEvent]:
@@ -188,7 +190,9 @@ class StreamingVad:
             # 語音 frame，或遲滯區間內：延續目前的語音（候選）段
             if is_speech:
                 self._last_speech_end = frame_end
-                self._paused = False
+                if self._paused:
+                    self._paused = False
+                    yield VadEvent("resume", frame_start, detected_at)
         else:
             silence = frame_end - self._last_speech_end
             if (

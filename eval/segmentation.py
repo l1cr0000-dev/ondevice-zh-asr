@@ -134,10 +134,13 @@ def summarize_provisionals(utterances: Sequence[dict[str, Any]]) -> dict[str, An
 
     - 被取代：暫定結果之後同一句段又開始說話（不是句段的最後一個暫定結果），文字通常只是半句。
     - 最後一個暫定結果與最終結果相同的比例：靜音一路到定稿時，暫定結果是否就是最終文字。
-    - 重新解碼耗時：暫定結果時刻 − 停頓事件時已送入的音訊終點（≈ 計算時間）。
+    - 產生暫定結果的耗時：暫定結果時刻 − 停頓事件時已送入的音訊終點（≈ 計算時間；redecode 做法是
+      重新解碼整句，finalize 做法只是補零解碼）。
+    - 恢復時重新解碼（finalize 做法）：每次恢復說話時重新解碼整句的計算時間，恢復後的 partial 晚這麼久。
     """
     total = superseded = segments = matched = 0
     compute_ms: list[float] = []
+    resume_ms: list[float] = []
     for u in utterances:
         for seg in u["segments"]:
             provs = seg.get("provisionals", [])
@@ -148,6 +151,7 @@ def summarize_provisionals(utterances: Sequence[dict[str, Any]]) -> dict[str, An
             superseded += len(provs) - 1
             matched += provs[-1]["text"] == seg["text"]
             compute_ms.extend((p["emitted_s"] - p["audio_end_s"]) * 1000 for p in provs)
+            resume_ms.extend(t * 1000 for t in seg.get("resume_redecode_s", []))
     if not total:
         return None
     return {
@@ -156,4 +160,5 @@ def summarize_provisionals(utterances: Sequence[dict[str, Any]]) -> dict[str, An
         "superseded": superseded,
         "last_matches_final": matched / segments,
         "redecode_ms": summarize(compute_ms),
+        "resume_redecode_ms": summarize(resume_ms),
     }
