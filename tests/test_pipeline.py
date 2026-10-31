@@ -15,7 +15,7 @@ import numpy.typing as npt
 import pytest
 
 from src.asr import DEFAULT_MODEL, SAMPLE_RATE, AsrStream, StreamingAsr, load_asr
-from src.pipeline import PipelineConfig, StreamingPipeline, Utterance, transcribe
+from src.pipeline import Partial, PipelineConfig, StreamingPipeline, Utterance, transcribe
 from src.vad import DEFAULT_MODEL_PATH, SileroVadModel, VadConfig, load_wav
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -152,6 +152,17 @@ def test_timestamps_are_ordered_and_consistent() -> None:
             assert round(t * 100) == pytest.approx(t * 100, abs=1e-6)
         assert [p.emitted_s for p in utt.partials] == sorted(p.emitted_s for p in utt.partials)
     assert utts[0].final_s is not None and utts[0].final_s < utts[1].start_emitted_s
+
+
+def test_final_text_ready_is_first_partial_equal_to_final() -> None:
+    utt = Utterance(index=0, speech_start_s=0.0, audio_start_s=0.0, start_emitted_s=0.3)
+    assert utt.final_text_ready_s is None  # 尚未 finalize
+    utt.partials = [Partial(1.0, "你"), Partial(1.5, "你好"), Partial(2.0, "你好嗎"),
+                    Partial(2.5, "你好")]  # fmt: skip
+    utt.text, utt.final_s = "你好", 3.0
+    assert utt.final_text_ready_s == 1.5  # 第一次出現，之後變過也不影響
+    utt.text = "你好嗎呀"  # partial 從未完整：最終結果時刻
+    assert utt.final_text_ready_s == 3.0
 
 
 def test_first_token_audio_position_uses_stream_offset() -> None:

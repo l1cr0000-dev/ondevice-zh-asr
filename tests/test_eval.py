@@ -153,6 +153,8 @@ def _seg(text: str, ftl: float | None, tail: float | None) -> dict[str, object]:
 def test_run_config_name_marks_non_default_options() -> None:
     assert _cfg().name.endswith("_t1_lead1000")
     assert RunConfig(**{**_cfg().__dict__, "blank_penalty": 2.0}).name.endswith("_lead1000_bp2")
+    tail = RunConfig(**{**_cfg().__dict__, "tail_silence_ms": 1500, "blank_penalty": 2.0})
+    assert tail.name.endswith("_lead1000_tail1500_bp2")
 
 
 def test_summarize_run_latency_uses_first_segment_with_text() -> None:
@@ -211,7 +213,15 @@ def test_run_eval_end_to_end(tmp_path: Path) -> None:
     assert m["cer"] <= 0.15
     assert m["segments_per_utterance"]["max"] == 2  # fixture 是兩句
     assert 0 < m["first_token_latency_ms"]["mean"] < 2000
-    assert res["config"]["lead_silence_ms"] == 1000 and result_file.stem.endswith("_lead1000")
+    assert res["config"]["lead_silence_ms"] == 1000 and res["config"]["tail_silence_ms"] == 1500
+    assert result_file.stem.endswith("_lead1000_tail1500")
+    (utt,) = res["utterances"]
+    assert utt["processed_s"] == pytest.approx(utt["duration_s"] + 2.5, abs=1e-3)
+    # 句尾補足靜音後，最後一句由 VAD 靜音計時收尾：尾字延遲 ≈ min_silence + finalize
+    assert m["tail_latency_ms"]["mean"] >= 500
+    for seg in utt["segments"]:
+        assert seg["end_emitted_s"] <= seg["final_s"]
+        assert seg["final_text_ready_s"] <= seg["final_s"]
     # 端到端起點早於 VAD 起點（fixture 開頭有靜音），所以端到端延遲較大
     assert m["e2e_first_token_latency_ms"]["mean"] > m["first_token_latency_ms"]["mean"]
     assert m["memory_mb"]["peak_rss"] > m["memory_mb"]["baseline_rss"] > 0

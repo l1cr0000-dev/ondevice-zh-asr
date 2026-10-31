@@ -82,6 +82,17 @@ class Utterance:
             return None
         return self.final_s - self.speech_end_s
 
+    @property
+    def final_text_ready_s(self) -> float | None:
+        """最終文字就緒時刻：與最終結果完全相同的文字第一次出現在 partial 中的時刻。
+
+        partial 從未等於最終結果（例如句尾的字要 finalize 補零後才解出）時取 `final_s`。
+        與 `end_emitted_s` 比較，可知 VAD 判定結束前 partial 是否已含完整句子。
+        """
+        if self.final_s is None:
+            return None
+        return next((p.emitted_s for p in self.partials if p.text == self.text), self.final_s)
+
 
 @dataclass(frozen=True)
 class PipelineEvent:

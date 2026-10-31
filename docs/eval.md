@@ -12,7 +12,7 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 ```
 
 多個值的參數（`--model`、`--min-silence-ms`、`--pre-roll-ms`、`--chunk-ms`、`--threads`）取笛卡兒積。
-`--limit N` 只跑前 N 句（除錯用；例如 `--smoke --limit 20` 約 5 秒 / 模型，改程式時先用它確認能跑通）。`--lead-silence-ms` 設定每條音訊前補的靜音（預設 1000，見首字延遲）。`--help` 列出全部參數與預設值。
+`--jobs N` 以 N 個子程序並行（見下方「並行」）。`--limit N` 只跑前 N 句（除錯用；例如 `--smoke --limit 20` 約 5 秒 / 模型，改程式時先用它確認能跑通）。`--lead-silence-ms` 設定每條音訊前補的靜音（預設 1000，見首字延遲）。`--help` 列出全部參數與預設值。
 正式報告的數字一律用 3000 句評測集；`--smoke` 只用來在改動後快速確認結果沒變（200 句的 CER 信賴區間約 ±1 個百分點，不適合下結論）。
 `--manifest data/aishell1_test_full/manifest.jsonl` 可跑完整 7176 句（需先 `prepare_eval_data.py -n 7176`，約 1.1 GB）。
 
@@ -32,13 +32,43 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 
 選這個來源的原因：官方 `AISHELL/AISHELL-1` 的 Hugging Face repo 只上傳了 100 位訓練集說話人，沒有 test set；OpenSLR SLR33 只提供 15 GB 的完整壓縮檔。`shenyunhang/AISHELL-1` 保留官方的 `data_aishell/wav/test/<說話人>/<句子>.wav` 結構，可以只下載抽中的檔案（200 句約 32 MB、3000 句約 470 MB）。它是第三方鏡像，不是官方發布；句數與標註檔大小都與官方一致，但音訊內容無法對官方 checksum 驗證。
 
+### 連續多句集（B4）
+
+`uv run scripts/prepare_continuous_data.py` → `data/aishell1_continuous_300/`。由 300 句 MFA 字級對齊集（`prepare_alignment.py`）合成：
+
+- 同一說話人的句子（seed 20261101 打亂）每 4 句串成一條，共 77 條、300 句、23.2 分鐘。
+- 每句只保留真實語音起訖點（MFA 首字起點 / 末字結束）外 50 ms 的原始音訊；句間停頓（前一句末字結束 → 下一句首字起點）依 0.2 / 0.3 / 0.5 / 0.8 / 1.2 / 2.0 s 循環分配，各 37–38 個，扣掉兩邊 50 ms 的部分填數位靜音。
+- manifest 每條多了 `sentences`（每句的 `id`、`text`、真實 `start_s` / `end_s`）與 `pauses_s`。
+- 每句的真實起訖點已知，不依賴 VAD；起訖點的精度取決於 MFA（約 10 ms frame，尚未人工抽查）。
+- 限制：margin 內是原始錄音底噪、停頓中間是數位零，底噪不連續；句間停頓長度是人為分檔，不是真實口語的分佈，所以結果要**按停頓長度分開看**，整體平均值取決於分檔比例、沒有意義。沒有噪音。
+
+`run_eval.py --manifest data/aishell1_continuous_300/manifest.jsonl` 時，結果多一個 `metrics.segmentation`（見下方「斷句指標」）。
+
 ## 執行方式
 
 - 每個設定在**獨立子程序**中載入模型、跑完全部句子、量峰值記憶體；父程序只做 CER 與彙整。
 - 每條 wav 用 `src.pipeline.transcribe` 以 `chunk_ms`（預設 10 ms）切塊送入，**模擬即時**：一個 chunk 要等最後一個樣本「到達」（依音訊實際時長）才能送入，送入後的計算時間實際量測並累加，計算比音訊慢時會自然積壓。不真的 sleep。
 - 一條 wav 被 VAD 切成多段時，各段文字以空白連接後當作這條的假設文字（正規化會去掉空白）。
 - 每條 wav 前面先補 `lead_silence_ms`（預設 1000 ms）的數位靜音（全零樣本）再送入，作為端到端首字延遲的起點。結果 JSON 中的位置（`speech_start_s` 等）都換回原始音訊的時間軸（補靜音結束 = 0）。設 `--lead-silence-ms 0` 可重現 2026-10-30 以前的設定。
+- 每條 wav 後面再補 `tail_silence_ms`（預設 1500 ms）的數位靜音，讓句子以 VAD 的靜音計時收尾，而不是由音訊結束（flush）收尾，尾字延遲才不會被截斷（見尾字延遲）。設 `--tail-silence-ms 0` 可重現 2026-10-31 以前的設定；結果名稱非 0 時加 `_tail<值>`。
 - 單執行緒（VAD 與 ASR 的 ONNX Runtime intra-op 都是 1）、CPU。
+
+### 並行（`--jobs`）
+
+時間幾乎全花在模型推論（profile：ASR `decode_stream` 85%、VAD 9%，Python 開銷 < 2%），單程序沒有可省的空間。`--jobs N` 同時跑 N 個子程序；設定數少於 N 時把同一設定的句子連續切成多份，結果依 manifest 順序合併（峰值 RSS、載入時間取各份最大值）。結果 JSON 的 `config.parallel_jobs` / `config.num_shards` 記錄並行方式。
+
+並行會互搶 CPU，計算時間變長，而計算時間會計入模擬即時的延遲。200 句冒煙集實測（2026-10-31，Apple M5，4 效能核 + 6 節能核）：
+
+| jobs | 牆鐘時間 | RTF | 首字延遲 mean (ms) | 尾字延遲 mean (ms) | CER |
+|---|---|---|---|---|---|
+| 1 | 44 s | 0.0268 | 1002 | 533 | 5.14% |
+| 2 | 25 s | 0.0297（+11%） | 1003 | 538 | 5.14% |
+| 3 | 22 s | 0.0366（+37%） | 1007 | 550 | 5.14% |
+| 4 | 25 s | 0.0552（+106%） | 1016 | 582 | 5.14% |
+
+- **CER 與切段不受影響**（逐句結果相同），只看 CER 的掃描可用 `--jobs 4`。
+- **延遲比較用 `--jobs 2`**（偏差 ≤ 5 ms），且比較的兩邊要用同樣的 jobs。
+- **正式的 RTF、峰值 RSS 與基準延遲一律 `--jobs 1`**（預設）。
 
 ## 文字正規化（CER 前）
 
@@ -105,6 +135,21 @@ VAD 起點首字延遲的細節：
 
 每條音訊最後一個句段：從 VAD 語音終點（`speech_end_s`，含 padding）到最終結果輸出。包含 VAD 等待 `min_silence_ms` 確認結束，以及 finalize 的補零解碼。
 
+**最終文字提早就緒**（`final_text_ready_lead_ms`，診斷用）：同一句段，「最終結果的完整文字第一次出現在 partial 中」的時刻（`final_text_ready_s`）到最終結果的時間差；partial 從未等於最終結果時為 0。`final_text_ready_before_end` 是最終文字在 VAD 結束事件之前就已出現的句數。逐句段另記 `end_emitted_s`、`final_text_ready_s`、`final_s`（原始音訊時間軸）。以 MFA 真實末字結束點為起點的拆解見 `scripts/endpoint_diagnosis.py`。
+
+### 斷句指標（連續多句集）
+
+`eval/segmentation.py`。句段與句子「重疊」指句段的 VAD 區間與句子的真實語音區間交集超過 50 ms。
+
+| 欄位 | 定義 |
+|---|---|
+| `boundary_detected_by_pause` | 每種停頓長度下，句間邊界被正確切開的比例。有一個句段同時與前後兩句重疊 = 合併 |
+| `sentences_split_inside` | 與 2 個以上句段重疊的句子數（句中誤切） |
+| `sentences_missed` | 沒有任何句段重疊的句子數 |
+| `exact_files` | 句段與句子一一對應的條數 |
+| `tail_latency_ms_by_pause` | 每句的**真實尾字延遲**：真實末字結束 → 與它重疊的最後一個句段的最終結果。依這句之後的停頓分組，`end` 是每條最後一句。兩句被合併時前一句要等合併的句段結束，延遲包含下一句的長度，這就是合併的代價 |
+| `first_token_latency_true_onset_ms` | 每句的**真實首字延遲**：句子是句段的第一句時（沒有被併入前一句），句段首字出現時刻 → 真實首字起點。與 VAD 無關（B5） |
+
 ### 峰值記憶體
 
 子程序結束前的 `resource.getrusage(RUSAGE_SELF).ru_maxrss`（macOS 單位是 bytes，Linux 是 KB，程式已分別換算），單位 MB。包含 Python 直譯器與 numpy / onnxruntime 本身；另記錄模型載入前與載入後的 RSS，兩者之差約等於模型佔用。
@@ -143,5 +188,5 @@ VAD 起點首字延遲的細節：
 - 模型訓練資料是否含 AISHELL-1 會影響 CER 的解讀（同領域 / 跨領域 / 資料洩漏），見 [models.md](models.md)。
 - 3000 句佔 test set 的 42%。論文的 AISHELL-1 CER 通常是完整 7176 句，數字不能逐位對照。
 - 2026-10-30 的 VAD / pre-roll 參數掃描是在 200 句子集上做的；3000 句集只跑了預設設定。
-- 尾字延遲受句尾靜音長度限制：AISHELL 句尾靜音中位數約 410 ms、全部短於 800 ms，`min_silence_ms` 大於句尾靜音時句子由音訊結束（flush）收尾，量到的尾字延遲會低估即時輸入的實際值。
+- 尾字延遲受句尾靜音長度限制：AISHELL 句尾靜音中位數約 410 ms、全部短於 800 ms，`min_silence_ms` 大於句尾靜音時句子由音訊結束（flush）收尾，量到的尾字延遲會低估即時輸入的實際值。2026-10-31 起預設後補 1500 ms 靜音修正（補的靜音加上句尾原有靜音，`min_silence_ms` 不超過約 1500 ms 時都由 VAD 收尾）；之前的結果仍有此問題。
 - 同一天、同一設定名的結果會覆寫。

@@ -4,6 +4,7 @@
     uv run scripts/prepare_eval_data.py      # 先準備資料（一次即可）：AISHELL-1 test 隨機 3000 句
     uv run eval/run_eval.py                  # 預設模型與 pipeline 設定，3000 句正式評測集
     uv run eval/run_eval.py --smoke          # 快速冒煙：固定 seed 抽樣的 200 句子集
+    uv run eval/run_eval.py --jobs 4         # 4 個子程序並行（RTF / 峰值 RSS 不是正式值）
     uv run eval/run_eval.py --model zipformer-zh-14m --min-silence-ms 500 --pre-roll-ms 200
     # 參數掃描：多個值取笛卡兒積，每個組合各存一份結果，最後印出總表
     uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \\
@@ -23,6 +24,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from datetime import date
 from importlib import metadata
@@ -37,6 +39,7 @@ SMOKE_MANIFEST = REPO_ROOT / "data" / "aishell1_test_200" / "manifest.jsonl"
 BOOTSTRAP_RESAMPLES = 10000
 RESULTS_DIR = REPO_ROOT / "eval" / "results"
 DEFAULT_LEAD_SILENCE_MS = 1000
+DEFAULT_TAIL_SILENCE_MS = 1500
 
 
 @dataclass(frozen=True)
@@ -55,10 +58,13 @@ class RunConfig:
     warmup: int
     lead_silence_ms: int = DEFAULT_LEAD_SILENCE_MS  # 每條音訊前補的數位靜音（端到端首字延遲的起點）
     blank_penalty: float = 0.0  # ASR 解碼的 blank penalty（0 = 不調整）
+    # 每條音訊後補的數位靜音：句尾靜音夠長，VAD 才會以靜音計時（而非音訊結束）收尾，尾字延遲才不被截斷
+    tail_silence_ms: int = 0
 
     @property
     def name(self) -> str:
         lead = f"_lead{self.lead_silence_ms}" if self.lead_silence_ms else ""
+        lead += f"_tail{self.tail_silence_ms}" if self.tail_silence_ms else ""
         lead += f"_bp{self.blank_penalty:g}" if self.blank_penalty else ""
         return (
             f"{self.model}_sil{self.vad_min_silence_ms}_pre{self.pre_roll_ms}"
@@ -83,7 +89,8 @@ def _peak_rss_mb() -> float:
     return peak / 2**20 if sys.platform == "darwin" else peak / 2**10
 
 
-def worker(cfg: RunConfig) -> dict[str, Any]:
+def worker(cfg: RunConfig, shard: int = 0, num_shards: int = 1) -> dict[str, Any]:
+    """跑 manifest 中第 `shard` 份（共 `num_shards` 份，連續切分）的句子。"""
     import numpy as np
 
     from src.asr import SAMPLE_RATE, load_asr
@@ -93,6 +100,7 @@ def worker(cfg: RunConfig) -> dict[str, Any]:
     rss_baseline = _rss_mb()
     manifest_path = Path(cfg.manifest)
     rows = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines()]
+    rows = rows[len(rows) * shard // num_shards : len(rows) * (shard + 1) // num_shards]
     pipe_cfg = PipelineConfig(
         vad=VadConfig(
             threshold=cfg.vad_threshold,
@@ -112,10 +120,16 @@ def worker(cfg: RunConfig) -> dict[str, Any]:
 
     lead = cfg.lead_silence_ms * SAMPLE_RATE // 1000
     lead_s = lead / SAMPLE_RATE
+    tail = cfg.tail_silence_ms * SAMPLE_RATE // 1000
+
+    def shift(t: float | None) -> float | None:
+        return None if t is None else t - lead_s
 
     def run(path: Path) -> tuple[float, float, list[Any]]:
         audio = load_wav(path)  # 讀檔與補靜音不計時
-        audio = np.concatenate([np.zeros(lead, dtype=audio.dtype), audio])
+        audio = np.concatenate(
+            [np.zeros(lead, dtype=audio.dtype), audio, np.zeros(tail, dtype=audio.dtype)]
+        )
         start = time.perf_counter()
         utts = transcribe(audio, vad_model, asr, pipe_cfg, chunk_ms=cfg.chunk_ms)
         return len(audio) / SAMPLE_RATE, time.perf_counter() - start, utts
@@ -131,9 +145,11 @@ def worker(cfg: RunConfig) -> dict[str, Any]:
                 "id": row["id"],
                 "ref": row["text"],
                 "hyp": " ".join(u.text for u in utts if u.text),
-                "duration_s": duration - lead_s,  # 原始音訊長度
+                "duration_s": duration - lead_s - tail / SAMPLE_RATE,  # 原始音訊長度
                 "processed_s": duration,  # 實際送入 pipeline 的長度（含補靜音），RTF 的分母
                 "compute_s": compute,
+                # 連續多句集（prepare_continuous_data.py）才有：每句的真實起訖點與句間停頓
+                **{k: row[k] for k in ("sentences", "pauses_s") if k in row},
                 # 位置與時刻都換回原始音訊的時間軸（補靜音結束 = 0）
                 "segments": [
                     {
@@ -151,6 +167,11 @@ def worker(cfg: RunConfig) -> dict[str, Any]:
                             else u.first_token_audio_s - lead_s
                         ),
                         "tail_latency_s": u.tail_latency_s,
+                        # 模擬即時的時刻，換回原始音訊時間軸：VAD 結束事件、最終文字就緒、最終結果
+                        "end_emitted_s": shift(u.end_emitted_s),
+                        "final_text_ready_s": shift(u.final_text_ready_s),
+                        "final_s": shift(u.final_s),
+                        "num_partials": len(u.partials),
                     }
                     for u in utts
                 ],
@@ -242,7 +263,9 @@ def cer_confidence(utts: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> dict[str, Any]:
+def summarize_run(
+    cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any], jobs: int = 1
+) -> dict[str, Any]:
     from eval.metrics import corpus_cer, summarize
     from eval.text_norm import normalize
     from src.vad import VAD_MODEL_NAME
@@ -256,6 +279,9 @@ def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> d
     first_token_ms: list[float] = []  # 每條音訊一個值：第一個有字的句段
     e2e_first_token_ms: list[float] = []  # 同一句段，起點改為補靜音結束
     tail_ms: list[float] = []  # 每條音訊一個值：最後一個句段
+    # 同一句段：最終文字就緒 → 最終結果（= 若一就緒就輸出，最終結果可提早多少）
+    ready_lead_ms: list[float] = []
+    ready_before_end = 0  # 最終文字在 VAD 結束事件前已出現在 partial 中的句數
     vad_delay_ms: list[float] = []
     seg_counts: list[int] = []
     for u in utts:
@@ -269,6 +295,10 @@ def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> d
                 e2e_first_token_ms.append(first["e2e_first_token_latency_s"] * 1000)
         if segs and segs[-1]["tail_latency_s"] is not None:
             tail_ms.append(segs[-1]["tail_latency_s"] * 1000)
+        last = segs[-1] if segs else None
+        if last is not None and last.get("final_text_ready_s") is not None and last["text"]:
+            ready_lead_ms.append((last["final_s"] - last["final_text_ready_s"]) * 1000)
+            ready_before_end += last["final_text_ready_s"] < last["end_emitted_s"]
         u["ref_norm"] = normalize(u["ref"])
         u["hyp_norm"] = normalize(u["hyp"])
 
@@ -276,6 +306,12 @@ def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> d
     for n in seg_counts:
         key = str(n) if n < 3 else "3+"
         seg_hist[key] = seg_hist.get(key, 0) + 1
+
+    segmentation = None
+    if utts and all("sentences" in u for u in utts):
+        from eval.segmentation import summarize_segmentation
+
+        segmentation = summarize_segmentation(utts)
 
     files = [{**f, "precision": _precision(f["path"])} for f in raw["model_files"]]
     model_bytes = sum(f["bytes"] for f in files)
@@ -287,6 +323,9 @@ def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> d
             "asr_name": raw["asr_name"],
             "vad_model": VAD_MODEL_NAME,
             "timing": "simulated-realtime",
+            # 同一設定的句子切成幾份、各在一個子程序中跑（> 1 時 RTF / 峰值 RSS 不是正式值）
+            "num_shards": raw.get("num_shards", 1),
+            "parallel_jobs": jobs,
         },
         "environment": env,
         "metrics": {
@@ -301,11 +340,14 @@ def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> d
             "no_text_utterances": len(utts) - len(first_token_ms),
             "vad_start_delay_ms": summarize(vad_delay_ms),
             "tail_latency_ms": summarize(tail_ms),
+            "final_text_ready_lead_ms": summarize(ready_lead_ms),
+            "final_text_ready_before_end": ready_before_end,
             "segments_per_utterance": {
                 "mean": sum(seg_counts) / len(seg_counts),
                 "max": max(seg_counts),
                 "histogram": dict(sorted(seg_hist.items())),
             },
+            "segmentation": segmentation,
             "memory_mb": raw["memory_mb"],
             "model_size_mb": model_bytes / 2**20,
             "load_s": raw["load_s"],
@@ -315,10 +357,10 @@ def summarize_run(cfg: RunConfig, raw: dict[str, Any], env: dict[str, Any]) -> d
     }
 
 
-def run_one(cfg: RunConfig) -> dict[str, Any]:
+def run_shard(cfg: RunConfig, shard: int, num_shards: int) -> dict[str, Any]:
     proc = subprocess.run(
         [sys.executable, "-I", str(Path(__file__).resolve()), "--worker"],
-        input=json.dumps(asdict(cfg)),
+        input=json.dumps({"config": asdict(cfg), "shard": shard, "num_shards": num_shards}),
         capture_output=True,
         text=True,
         check=False,
@@ -329,6 +371,32 @@ def run_one(cfg: RunConfig) -> dict[str, Any]:
     sys.stderr.write(proc.stderr)
     result: dict[str, Any] = json.loads(proc.stdout)
     return result
+
+
+def merge_shards(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    """合併同一設定各份的結果：逐句結果依 manifest 順序串接；記憶體與載入時間取各份最大值。"""
+    first = parts[0]
+    return {
+        "asr_name": first["asr_name"],
+        "load_s": max(p["load_s"] for p in parts),
+        "memory_mb": {k: max(p["memory_mb"][k] for p in parts) for k in first["memory_mb"]},
+        "model_files": first["model_files"],
+        "utterances": [u for p in parts for u in p["utterances"]],
+        "num_shards": len(parts),
+    }
+
+
+def run_all(configs: list[RunConfig], jobs: int) -> Iterator[tuple[RunConfig, dict[str, Any]]]:
+    """以最多 `jobs` 個子程序並行執行；設定數少於 jobs 時把每個設定的句子切成多份。依設定順序產出結果。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    shards = max(1, -(-jobs // len(configs)))  # ceil
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = [
+            [pool.submit(run_shard, cfg, i, shards) for i in range(shards)] for cfg in configs
+        ]
+        for cfg, fs in zip(configs, futures, strict=True):
+            yield cfg, merge_shards([f.result() for f in fs])
 
 
 # ---------- 輸出 ----------
@@ -392,6 +460,17 @@ def print_detail(res: dict[str, Any]) -> None:
         f"以句重抽 {_ci(ci['utterance'])}  以說話人重抽 {_ci(ci['speaker'])}"
         f"（{ci['num_speakers'] or '-'} 位）"
     )
+    ready = m.get("final_text_ready_lead_ms") or {"mean": None, "p50": None, "n": 0}
+    ready_s = (
+        f"mean {_fmt(ready['mean'])}  P50 {_fmt(ready['p50'])}"
+        f"（VAD 結束前已就緒 {m.get('final_text_ready_before_end', '-')} / {ready['n']} 句）"
+    )
+    jobs, shards = c.get("parallel_jobs", 1), c.get("num_shards", 1)
+    parallel = (
+        "1 個子程序（RTF / 峰值 RSS 為正式值）"
+        if jobs == 1
+        else f"{jobs} 個子程序並行，本設定切 {shards} 份（RTF / 峰值 RSS 非正式值）"
+    )
     mem = m["memory_mb"]
     mem_s = (
         f"peak RSS {mem['peak_rss']:.0f}"
@@ -402,7 +481,8 @@ def print_detail(res: dict[str, Any]) -> None:
         ("ASR", c["asr_name"]),
         ("VAD", vad),
         ("pre-roll / chunk", f"{c['pre_roll_ms']} ms / {c['chunk_ms']} ms，暖機 {c['warmup']} 句"),
-        ("前補靜音", f"{c['lead_silence_ms']} ms"),
+        ("並行", parallel),
+        ("前 / 後補靜音", f"{c['lead_silence_ms']} / {c.get('tail_silence_ms', 0)} ms"),
         (
             "環境",
             f"{env['chip']} ({env['machine']}) macOS {env['macos']} commit {env['commit']}{dirty}",
@@ -415,10 +495,39 @@ def print_detail(res: dict[str, Any]) -> None:
         ("首字延遲 VAD 起點 (ms)", ftl),
         ("  其中 VAD 觸發 (ms)", f"mean {_fmt(m['vad_start_delay_ms']['mean'])}"),
         ("尾字延遲 (ms)", f"mean {_fmt(tail['mean'])}  P90 {_fmt(tail['p90'])}"),
+        ("  最終文字提早就緒 (ms)", ready_s),
         ("每條切段數", f"mean {seg['mean']:.2f}  max {seg['max']}  分佈 {seg['histogram']}"),
         ("記憶體 (MB)", mem_s),
         ("模型大小 (MB)", f"{m['model_size_mb']:.1f}"),
     ]
+    sg = m.get("segmentation")
+    if sg is not None:
+        by = sg["boundary_detected_by_pause"]
+        tails = sg["tail_latency_ms_by_pause"]
+        ft = sg["first_token_latency_true_onset_ms"]
+        lines += [
+            (
+                "斷句（連續多句）",
+                (
+                    f"{sg['files']} 條 / {sg['sentences']} 句，完全切對 {sg['exact_files']} 條，"
+                    f"句中誤切 {sg['sentences_split_inside']} 句，漏句 {sg['sentences_missed']} 句"
+                ),
+            ),
+            (
+                "  句間切開率",
+                "  ".join(f"{k}s {v['rate'] * 100:.0f}%" for k, v in by.items()),
+            ),
+            (
+                "  每句尾字 mean (ms)",
+                "  ".join(
+                    f"{k}{'s' if k != 'end' else ''} {_fmt(v['mean'])}" for k, v in tails.items()
+                ),
+            ),
+            (
+                "  首字（真實起點, ms）",
+                f"mean {_fmt(ft['mean'])}  P90 {_fmt(ft['p90'])}  (n={ft['n']})",
+            ),
+        ]
     width = max(display_width(k) for k, _ in lines)
     print("-" * 72)
     for k, v in lines:
@@ -455,11 +564,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="每條音訊前補的靜音長度；端到端首字延遲以補靜音的結束點為起點（0 = 不補，結果名稱不加 _lead）",
     )
     p.add_argument(
+        "--tail-silence-ms",
+        type=non_negative_int,
+        default=DEFAULT_TAIL_SILENCE_MS,
+        help="每條音訊後補的靜音長度，讓句子以 VAD 靜音計時收尾、尾字延遲不被音訊結束截斷"
+        "（0 = 不補，結果名稱不加 _tail）",
+    )
+    p.add_argument(
         "--blank-penalty",
         type=float,
         nargs="+",
         default=[0.0],
         help="ASR 解碼時從 blank 減去的分數（可給多個值掃描；非 0 時結果名稱加 _bp<值>）",
+    )
+    p.add_argument(
+        "--jobs",
+        type=positive_int,
+        default=1,
+        help="並行的子程序數（每個仍是 --threads 執行緒）。設定數少於此值時把句子切成多份。"
+        "> 1 時 CPU 互搶、可能排到效能核心以外，RTF 與峰值 RSS 不能當正式值；CER 不受影響",
     )
     p.add_argument("--tag", default="", help="掃描總表檔名的標籤")
     p.add_argument("--results-dir", type=Path, default=RESULTS_DIR, help="結果輸出目錄")
@@ -468,8 +591,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> int:
     if "--worker" in sys.argv[1:]:
-        cfg = RunConfig(**json.loads(sys.stdin.read()))
-        print(json.dumps(worker(cfg)))
+        job = json.loads(sys.stdin.read())
+        print(json.dumps(worker(RunConfig(**job["config"]), job["shard"], job["num_shards"])))
         return 0
 
     args = parse_args()
@@ -510,6 +633,7 @@ def main() -> int:
             vad_speech_pad_ms=args.speech_pad_ms,
             warmup=args.warmup,
             lead_silence_ms=args.lead_silence_ms,
+            tail_silence_ms=args.tail_silence_ms,
             blank_penalty=bp,
         )
         for model, threads, chunk, sil, pre, bp in itertools.product(
@@ -526,9 +650,9 @@ def main() -> int:
     today = date.today().isoformat()
     suffix = f"_lim{args.limit}" if args.limit else ""
     summaries: list[dict[str, Any]] = []
-    for i, cfg in enumerate(configs, 1):
-        print(f"[{i}/{len(configs)}] {cfg.name}", file=sys.stderr)
-        res = summarize_run(cfg, run_one(cfg), env)
+    print(f"{len(configs)} 個設定，{args.jobs} 個子程序並行", file=sys.stderr)
+    for cfg, raw in run_all(configs, args.jobs):
+        res = summarize_run(cfg, raw, env, args.jobs)
         out = args.results_dir / f"{today}_{dataset}_{cfg.name}{suffix}.json"
         out.write_text(json.dumps(res, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print_detail(res)
