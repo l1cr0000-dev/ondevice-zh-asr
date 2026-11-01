@@ -1010,4 +1010,4 @@ X-ASR 不經 sherpa-onnx 推論，辨識結果不變，評測峰值 RSS 535 → 
 
 - 兩個後端 200 / 200 條 hyp 相同，205 / 205 段的文字、VAD 起訖點、首字位置、暫定結果相同。
 - sherpa 版的結果與 `feat/a2-default` 分支上的同設定冒煙結果 200 / 200 條相同，合併沒有改變行為。
-- 預設模型仍是 sherpa-onnx 版（`x-asr-480ms-int8`）；是否改用 `x-asr-480ms-int8-ort` 為預設另外決定。
+- **決定（2026-11-01）：預設模型改為 `x-asr-480ms-int8-ort`**（`DEFAULT_MODEL`）。理由：辨識結果逐句相同，峰值 RSS 541 → 353 MB，RTF 不變（0.0335 → 0.0323，雜訊範圍內）。不給 `--model` 時的冒煙集重跑：CER 4.80%、峰值 RSS 353 MB，200 / 200 條 hyp 與 sherpa 版相同。sherpa-onnx 版保留為 `x-asr-480ms-int8`，`--model x-asr-480ms-int8` 可退回。

@@ -22,7 +22,7 @@ flowchart LR
         HIST["_AudioHistory<br/>環形緩衝"]
         VAD["src.vad.StreamingVad<br/>遲滯雙閾值狀態機"]
         SIL["SileroVadModel<br/>ONNX Runtime · 32 ms frame"]
-        ASR["src.asr.AsrStream<br/>sherpa-onnx 串流 transducer<br/>（load_asr 依名稱載入）"]
+        ASR["src.asr.AsrStream<br/>串流 transducer（onnxruntime 1.31 / sherpa-onnx）<br/>（load_asr 依名稱載入）"]
         SIL -. 語音機率 .-> VAD
         VAD -- "start：建立 stream<br/>end：finalize" --> ASR
         HIST -- "從 VAD 起點 − pre-roll 補送" --> ASR
@@ -90,7 +90,7 @@ uv run pytest                             # 應為 84 passed、0 skipped
 ```bash
 uv run scripts/demo_vad.py [input.wav]    # VAD：印出語音段時間（--stream 看串流事件）
 uv run scripts/demo_asr.py [input.wav]    # 串流 ASR：模擬即時逐 chunk 送入，印出 partial / 最終結果
-                                          # --model x-asr-480ms-int8（預設）| zipformer-zh-14m
+                                          # --model x-asr-480ms-int8-ort（預設）| x-asr-480ms-int8 | zipformer-zh-14m
 uv run scripts/run_pipeline.py [input.wav] -o out.json  # VAD + ASR：每句文字與時間戳（JSON）
 uv run scripts/demo_mic.py                # 麥克風即時辨識，Ctrl+C 結束並印出首字延遲統計
 ```
@@ -156,6 +156,7 @@ CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句、每條前補 1 �
 ¶ 端到端首字延遲的起點是補靜音結束點，含原始音訊開頭未標註的靜音，絕對值高估實際感受到的延遲，只適合設定之間比較；首字延遲（VAD 起點）以 VAD 判定的語音起點為起點。定義見 [docs/eval.md](docs/eval.md)。
 \* 尾字延遲：VAD 語音終點（含 30 ms pad）→ 最終結果，≈ min_silence + 30–100 ms。上一版沒有後補靜音，句子多由音訊結束收尾，量到的值被截斷（X-ASR 480 ms 為 451 ms）。以 MFA 真實末字結束點起算，X-ASR 480 ms 為 580 ms（P90 651，300 句對齊集）。結束判定各設定的比較見 [docs/scoreboard.md](docs/scoreboard.md)。
 † 峰值 RSS 隨評測句數增加（200 句時 X-ASR 531、zh-14M 252 MB），增加的部分來自評測 / pipeline 端，不是模型推論（單獨解碼 100 → 1000 句只增加約 3 MB），原因待查，見 [backlog B11](docs/backlog.md)。不同評測集之間的峰值 RSS 不要直接比較。
+預設後端自 2026-11-01 起改為 onnxruntime 1.31.1 直接推論（`x-asr-480ms-int8-ort`），辨識結果與 sherpa-onnx 版逐句相同（200 句冒煙集），表中的 CER 與延遲不變；峰值 RSS 在 200 句冒煙集上 541 → 353 MB，3000 句未重跑。見 [docs/progress.md](docs/progress.md)。
 ‡ X-ASR 的訓練資料是否含 AISHELL-1 未知（見 [docs/models.md](docs/models.md)），這個 CER 不能當作跨領域泛化能力；zh-14M 依文件只用 WenetSpeech，對它是跨領域。
 
 **VAD / pre-roll 掃描**（200 句子集，commit `f576d57`；選參數時的依據，數字與上表不同集）：CER (%)，首字延遲 mean / P90 (ms)
@@ -193,7 +194,7 @@ CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句、每條前補 1 �
 
 - **首字延遲約 1 秒**（VAD 起點），計算每個 chunk 約 13 ms，換 Core ML / ANE 無法改善。換 160 ms chunk 只快約 130 ms 且 CER 顯著變差：瓶頸是模型多晚輸出第一個字：字級對齊顯示模型在首字唸完約 190 ms 後才輸出它（見 [docs/latency-analysis.md](docs/latency-analysis.md)）。
 - **結束判定用兩段門檻（A2）緩解，但沒有根治**：單一靜音門檻無法同時切對句中停頓與句間停頓（500 ms 時 15% 的單句音訊被切成多段；1000 ms 則短於門檻的句間停頓會讓兩句合併，前一句的最終結果要等下一句說完）。預設的 A2 在停頓 200 ms 時先給暫定結果、1000 ms 才定稿，使用者約 300 ms 就看到結果，代價是 35% 的句子先出現半句暫定結果再被修正、RTF 0.027 → 0.033；短於 0.3 s 的句間停頓仍會被合併（停頓 0.2 s 的句子平均約 1.3 s 才看到完整結果）。早 finalize 偶爾漏句尾的字，CER 比不早 finalize 的方案 A 高 0.05 個百分點。見 [docs/scoreboard.md](docs/scoreboard.md)。
-- **記憶體偏重**：X-ASR 載入後 RSS 比載入前多約 435 MB，遠大於模型檔 164 MB。關掉 ONNX Runtime 的 CPU memory arena 沒有效果（載入與峰值都在 ±1 MB 內），增加發生在載入階段而非推論；多出的部分是 sherpa-onnx 2.0.1 內附的 ONNX Runtime 1.28.2 在載入時留下約 180–190 MB 已釋放但未歸還的 malloc 記憶體（碎片），不是權重存了兩份；ORT 1.30.0 起沒有這個現象。見 [docs/progress.md](docs/progress.md)。
+- **記憶體偏重**：X-ASR 載入後 RSS 比載入前多約 435 MB，遠大於模型檔 164 MB。關掉 ONNX Runtime 的 CPU memory arena 沒有效果（載入與峰值都在 ±1 MB 內），增加發生在載入階段而非推論；多出的部分是 sherpa-onnx 2.0.1 內附的 ONNX Runtime 1.28.2 在載入時留下約 180–190 MB 已釋放但未歸還的 malloc 記憶體（碎片），不是權重存了兩份；ORT 1.30.0 起沒有這個現象。預設已改用不經 sherpa-onnx 的 onnxruntime 1.31.1 後端，評測峰值 RSS 約少 190 MB、footprint 載入峰值 426 → 274 MB。見 [docs/progress.md](docs/progress.md)。
 - 目前只跑 CPU；只在 macOS 驗證過。
 
 完整清單與優先順序見 [docs/backlog.md](docs/backlog.md)。
@@ -205,7 +206,7 @@ src/audio.py   取樣率與讀 wav（全專案共用）
 src/paths.py   repo 與 models/ 目錄
 src/cli.py     腳本共用的命令列參數
 src/vad/       語音活動偵測（Silero VAD 狀態機）
-src/asr/       串流語音辨識（介面 + sherpa-onnx 後端 + 模型註冊表）
+src/asr/       串流語音辨識（介面 + onnxruntime / sherpa-onnx 後端 + 模型註冊表）
 src/pipeline/  串接音訊輸入、VAD、ASR
 eval/          評測（CER / RTF / 延遲 / 記憶體）
 scripts/       一條命令可執行的入口腳本

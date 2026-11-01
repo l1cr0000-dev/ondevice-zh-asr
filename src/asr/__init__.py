@@ -40,7 +40,7 @@ __all__ = [
     "load_asr",
 ]
 
-DEFAULT_MODEL = "x-asr-480ms-int8"
+DEFAULT_MODEL = "x-asr-480ms-int8-ort"
 
 # sherpa-onnx transducer 模型：名稱 → (模型檔, 句尾補零秒數)。也供 scripts/probe_memory.py 直接載入。
 TRANSDUCER_SPECS: dict[str, tuple[TransducerFiles, float]] = {
