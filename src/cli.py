@@ -57,6 +57,19 @@ def add_pipeline_args(p: argparse.ArgumentParser, sweep: bool = False) -> None:
     p.add_argument(
         "--speech-pad-ms", type=non_negative_int, default=vad.speech_pad_ms, help="VAD 前後延伸"
     )
+    if not sweep:  # 評測腳本自己定義可掃描的版本
+        p.add_argument(
+            "--pause-ms",
+            type=non_negative_int,
+            default=0,
+            help="靜音滿此值先輸出暫定結果、滿 --min-silence-ms 才定稿（0 = 關閉；需小於 min_silence）",
+        )
+        p.add_argument(
+            "--provisional",
+            choices=["redecode", "finalize"],
+            default=defaults.provisional,
+            help="暫定結果的做法：redecode 停頓時重新解碼整句；finalize 停頓時 finalize、恢復說話時才重新解碼",
+        )
 
 
 def pipeline_config_from_args(args: argparse.Namespace) -> PipelineConfig:
@@ -67,8 +80,10 @@ def pipeline_config_from_args(args: argparse.Namespace) -> PipelineConfig:
             min_speech_ms=args.min_speech_ms,
             min_silence_ms=args.min_silence_ms,
             speech_pad_ms=args.speech_pad_ms,
+            pause_ms=args.pause_ms or None,
         ),
         pre_roll_ms=args.pre_roll_ms,
+        provisional=args.provisional,
     )
 
 

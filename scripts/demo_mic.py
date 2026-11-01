@@ -4,8 +4,15 @@
     uv run scripts/demo_mic.py                       # 預設輸入裝置
     uv run scripts/demo_mic.py --list-devices        # 列出輸入裝置
     uv run scripts/demo_mic.py --device 2 --min-silence-ms 400
+    # 兩個門檻（方案 A2）：靜音 200 ms 先給暫定結果，1000 ms 才定稿
+    uv run scripts/demo_mic.py --min-silence-ms 1000 --pause-ms 200 --provisional finalize
+    uv run scripts/demo_mic.py --model sensevoice-small-int8-p480 --min-silence-ms 1000 --pause-ms 200 \
+        --provisional finalize
 
-Ctrl+C 結束，印出本次統計（句數、首字延遲平均 / P50 / P90）。
+Ctrl+C 結束，印出本次統計（句數、首字延遲與「說完 → 結果」的平均 / P50 / P90）。
+
+「說完 → 結果」：VAD 語音終點（含 speech_pad_ms）對應的樣本到達時刻 → 這句的完整文字顯示的時刻
+（有暫定結果時取最後一個暫定結果，否則取最終結果）。暫定結果以「（暫定）」標示，之後若又開始說話會被修正。
 
 首字延遲在這裡是**牆鐘時間**：語音起點（VAD 起點，含 speech_pad_ms）對應的樣本到達時刻 → 第一個非空
 partial 顯示的時刻。樣本到達時刻以 PortAudio callback 被呼叫的時間推算，不含音訊硬體本身的輸入延遲
@@ -123,7 +130,9 @@ class Session:
     # 音訊第 0 個樣本對應的 perf_counter 時刻（由 callback 到達時間推算）
     t0: float = float("inf")
     first_token_wall: dict[int, float] = field(default_factory=dict)
+    provisional_wall: dict[int, float] = field(default_factory=dict)  # 最後一個暫定結果的顯示時刻
     latencies_ms: list[float] = field(default_factory=list)
+    result_ms: list[float] = field(default_factory=list)
 
     def handle(self, ev: PipelineEvent, now: float, interrupted: bool = False) -> None:
         utt = ev.utterance
@@ -134,6 +143,12 @@ class Session:
             if text.strip() and utt.index not in self.first_token_wall:
                 self.first_token_wall[utt.index] = now
             self.writer.update(text or "…")
+        elif ev.kind == "provisional":
+            text = utt.provisionals[-1].text
+            if text.strip():
+                self.first_token_wall.setdefault(utt.index, now)  # 非串流模型的第一個可見文字
+                self.provisional_wall[utt.index] = now
+            self.writer.update(f"{text}（暫定）")
         elif ev.kind == "final":
             if not utt.text.strip():
                 self.writer.clear()  # 噪音觸發 VAD 但沒辨識出字，不算一句
@@ -142,9 +157,16 @@ class Session:
             latency_ms = (first - (self.t0 + utt.speech_start_s)) * 1000
             self.latencies_ms.append(latency_ms)
             tag = "（中斷）" if interrupted else ""
-            self.writer.commit(
-                f"[{len(self.latencies_ms)}] {utt.text}{tag}  （首字延遲 {latency_ms:.0f} ms）"
-            )
+            detail = f"首字 {latency_ms:.0f} ms"
+            if utt.speech_end_s is not None and not interrupted:
+                # 停頓後沒有恢復時，最後一個暫定結果就是最終文字
+                shown = self.provisional_wall.get(utt.index, now)
+                if utt.provisionals and utt.provisionals[-1].text != utt.text:
+                    shown = now
+                result = (shown - (self.t0 + utt.speech_end_s)) * 1000
+                self.result_ms.append(result)
+                detail += f"，說完 → 結果 {result:.0f} ms"
+            self.writer.commit(f"[{len(self.latencies_ms)}] {utt.text}{tag}  （{detail}）")
 
     def print_summary(self) -> None:
         print("\n== 本次統計 ==")
@@ -152,13 +174,14 @@ class Session:
         print(f"句數：{n}")
         if n == 0:
             return
-        lat = self.latencies_ms
-        print(f"平均首字延遲：{statistics.fmean(lat):.0f} ms")
-        if n >= 2:
-            p50, p90 = np.percentile(lat, [50, 90])
-            print(
-                f"P50 / P90：{p50:.0f} / {p90:.0f} ms（最小 {min(lat):.0f}、最大 {max(lat):.0f}）"
-            )
+        for name, values in (("首字延遲", self.latencies_ms), ("說完 → 結果", self.result_ms)):
+            if not values:
+                continue
+            line = f"{name}：平均 {statistics.fmean(values):.0f} ms"
+            if len(values) >= 2:
+                p50, p90 = np.percentile(values, [50, 90])
+                line += f"，P50 / P90 {p50:.0f} / {p90:.0f} ms（最小 {min(values):.0f}、最大 {max(values):.0f}）"
+            print(line)
 
 
 def main() -> int:
