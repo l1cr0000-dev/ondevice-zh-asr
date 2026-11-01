@@ -1170,3 +1170,20 @@ profile（cProfile）：時間 97% 在 `session.run`，Python 端（fbank 送入
 - 採用批次 joiner：結果逐句不變，greedy search 時間減半，RTF 與延遲小幅改善。
 - 想再降 encoder 的計算，要從模型本身著手（Core ML / ANE、或把小運算在匯出時常數摺疊），屬於第二階段。
 - 待辦：閒置時重量執行緒 1 / 2 / 4 的 RTF（本次在負載下量測）；依「優化階段只跑小集合」，3000 句未重跑。
+
+---
+
+## 2026-11-01　未合併分支的實驗紀錄（保留索引）
+
+以下實驗做完但沒有合併進 `feat/latency-b1`（只合併有顯著提升或確定採用的）。完整紀錄（progress / scoreboard / models.md 的段落與程式）留在各分支上，**分支不要刪**；原始結果 JSON 已集中複製到主目錄（`eval/results/` 不進版控，只存在本機）：
+
+- 結果：`eval/results/archive/<分支名，/ 換成 ->/`（a2-default、b4-noise、b9-short-pause、light-ctc、ort-tuning、pseudo-stream；b7、b11 沒有輸出檔）。主目錄 `eval/results/` 本身是合併後各次評測的結果。
+- 產生的資料集（同樣只在本機）：`data/aishell1_continuous_300_tcar_snr0`、`data/aishell1_continuous_300_tcar_snr-5`（B4）、`data/aishell1_align_300_short3`（偽串流短句子集，MFA 語音長度 ≤ 3 s 的 100 句）。
+
+| 分支 / commit | 內容 | 結論（小集合，200 / 300 句） |
+|---|---|---|
+| `feat/light-ctc` / 3740c3a | 串流 zipformer small CTC INT8（27 MB）的 onnxruntime 後端 `small-ctc-zh-int8-ort` | CER 約 2 倍（200 句 9.34 vs 4.80%、300 句 7.00 vs 3.28%，皆顯著）；首字快約 300 ms（P50 706 vs 1036 ms）、峰值 RSS 約 183 vs 359–448 MB。不當預設，輕量備選 |
+| `feat/pseudo-stream` / 161140b、b6583c5、d331ad9 | SenseVoice 偽串流降計算量（`PartialSchedule`）、≤ 3 s 短句子集、授權查證 | 建議設定 `sensevoice-small-int8-ort-p480-960-max3`：可見首字 429–449 vs X-ASR 970–1086 ms，RTF 同量級，CER 持平；說完 → 完整結果慢 18–128 ms、RSS 多約 60–170 MB；商用依據只有 issue #287 的維護者回覆。保留為選項，預設不變（100 句 ×2、25 條，負載下量測） |
+| `feat/b4-noise` / d4f00da | DEMAND TCAR 車內噪音連續集（20 / 10 / 5 / 0 / −5 dB）與 VAD 誤觸發指標 | 誤觸發全為 0、CER 3.30–3.53% 與乾淨集無顯著差；TCAR 能量 98.7% 在 100 Hz 以下，寬頻 SNR 高估干擾，SNR 定義待決定 |
+| `feat/b11-eval-rss` / 21048e7 | 評測峰值 RSS 隨句數上升：改成以最長 20 句暖機 | 增長是推論暖機（malloc 碎片、程式碼分頁），不是洩漏；修正評測口徑，不影響 pipeline |
+| `feat/b7-no-fp32` / 0763a19、be2df9c、0d135e2 | 取消 FP32 參照、第二階段改為官方 INT8 + Core ML、X-ASR 參數量 | 純文件；X-ASR 153.4M 參數（97% INT8）、zh-14M 13.8M |
