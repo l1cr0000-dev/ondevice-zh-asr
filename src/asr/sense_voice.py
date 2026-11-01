@@ -7,8 +7,11 @@ onnxruntime 版存在的原因：sherpa-onnx 2.0.1 內附 ORT 1.28.2，載入 Se
 非串流模型一次看完整段音訊才辨識，沒有真正的 partial。實作成 `AsrStream` 的方式：
 - `accept_waveform` 只累積音訊；`finalize` 時把累積的音訊整段辨識一次。
 - 選用 `partial_every_s`：每多累積這麼長的音訊，就把目前為止的全部音訊整段辨識一次當 partial
-  （假的串流）。計算量隨句長成長，計入 `accept_waveform` 的耗時，因此會反映在模擬即時的延遲上。
-  None = 不產生 partial（首字要等到 finalize）。
+  （假的串流，偽串流）。計算量隨句長成長，計入 `accept_waveform` 的耗時，因此會反映在模擬即時的延遲上。
+  None = 不產生 partial（首字要等到 finalize 或 pipeline 的暫定結果）。
+- 降計算量的兩個選項（`PartialSchedule`）：`partial_first_s` 讓第一次 partial 與之後的間隔分開設定
+  （首字只取決於第一次，之後的更新可以稀疏）；`partial_max_s` 讓累積音訊超過這個長度後不再產生 partial，
+  只等 finalize / 暫定結果，限制長句段的最壞計算量。
 """
 
 from collections.abc import Callable
@@ -35,6 +38,51 @@ class SenseVoiceConfig:
     # 反正規化（數字轉阿拉伯數字、加標點）。AISHELL 標註是中文數字，評測的正規化不做 ITN，故關閉
     use_itn: bool = False
     partial_every_s: float | None = None
+    partial_first_s: float | None = None  # None = partial_every_s
+    partial_max_s: float | None = None  # None = 不限
+
+    @property
+    def schedule(self) -> "PartialSchedule | None":
+        if self.partial_every_s is None:
+            return None
+        return PartialSchedule(self.partial_every_s, self.partial_first_s, self.partial_max_s)
+
+    def describe(self) -> str:
+        sched = self.schedule
+        return f"threads={self.num_threads} language={self.language} itn={self.use_itn}" + (
+            f" {sched.describe()}" if sched else ""
+        )
+
+
+@dataclass(frozen=True)
+class PartialSchedule:
+    """偽 partial 的重新辨識時機，以這個 stream 已累積的音訊長度（秒）計：
+
+    first_s、first_s + every_s、first_s + 2 × every_s……，超過 max_s 之後不再重新辨識。
+    """
+
+    every_s: float
+    first_s: float | None = None  # None = every_s
+    max_s: float | None = None  # None = 不限
+
+    def __post_init__(self) -> None:
+        if self.every_s <= 0 or (self.first_s is not None and self.first_s <= 0):
+            raise ValueError("partial 間隔必須為正")
+
+    def next_sample(self, n: int) -> int | None:
+        """已累積 n 個樣本（且已處理完 n 之前的時機）時，下一次重新辨識的樣本數；None = 不再辨識。"""
+        first = round((self.every_s if self.first_s is None else self.first_s) * SAMPLE_RATE)
+        every = round(self.every_s * SAMPLE_RATE)
+        nxt = first if n < first else first + ((n - first) // every + 1) * every
+        if self.max_s is not None and nxt > self.max_s * SAMPLE_RATE:
+            return None
+        return nxt
+
+    def describe(self) -> str:
+        out = f"partial_every={self.every_s:g}s"
+        out += f" partial_first={self.first_s:g}s" if self.first_s is not None else ""
+        out += f" partial_max={self.max_s:g}s" if self.max_s is not None else ""
+        return out
 
 
 class SenseVoiceStream(AsrStream):
@@ -43,27 +91,30 @@ class SenseVoiceStream(AsrStream):
     def __init__(
         self,
         recognize: Callable[[npt.NDArray[np.float32]], str],
-        partial_every_s: float | None,
+        schedule: PartialSchedule | None,
     ) -> None:
         super().__init__()
         self._recognize = recognize
         self._chunks: list[npt.NDArray[np.float32]] = []
         self._n = 0  # 已累積的樣本數
-        self._every = None if partial_every_s is None else int(partial_every_s * SAMPLE_RATE)
-        self._next_partial = self._every
+        self._schedule = schedule
+        self._next_partial = None if schedule is None else schedule.next_sample(0)
         self._partial_text = ""
+        self.num_decodes = 0  # 整段辨識的次數（含 finalize）
 
     def _decode(self) -> str:
         if not self._n:
             return ""
+        self.num_decodes += 1
         return self._recognize(np.concatenate(self._chunks))
 
     def _accept(self, chunk: npt.NDArray[np.float32]) -> None:
         self._chunks.append(chunk.copy())
         self._n += len(chunk)
-        if self._next_partial is not None and self._every and self._n >= self._next_partial:
+        nxt = self._next_partial
+        if self._schedule is not None and nxt is not None and self._n >= nxt:
             self._partial_text = self._decode()
-            self._next_partial = (self._n // self._every + 1) * self._every
+            self._next_partial = self._schedule.next_sample(self._n)
 
     def _partial(self) -> str:
         return self._partial_text
@@ -96,12 +147,7 @@ class SenseVoiceAsr(StreamingAsr):
 
     @property
     def name(self) -> str:
-        every = self.config.partial_every_s
-        return (
-            f"sherpa-onnx/{SENSE_VOICE_DIR}/model.int8.onnx threads={self.config.num_threads}"
-            f" language={self.config.language} itn={self.config.use_itn}"
-            + (f" partial_every={every:g}s" if every else "")
-        )
+        return f"sherpa-onnx/{SENSE_VOICE_DIR}/model.int8.onnx {self.config.describe()}"
 
     def model_files(self) -> list[Path]:
         return list(self._paths.values())
@@ -113,7 +159,7 @@ class SenseVoiceAsr(StreamingAsr):
         return str(stream.result.text)
 
     def create_stream(self) -> SenseVoiceStream:
-        return SenseVoiceStream(self._recognize_audio, self.config.partial_every_s)
+        return SenseVoiceStream(self._recognize_audio, self.config.schedule)
 
 
 class SenseVoiceOrtAsr(StreamingAsr):
@@ -212,15 +258,10 @@ class SenseVoiceOrtAsr(StreamingAsr):
 
     @property
     def name(self) -> str:
-        every = self.config.partial_every_s
-        return (
-            f"onnxruntime/{SENSE_VOICE_DIR}/model.int8.onnx threads={self.config.num_threads}"
-            f" language={self.config.language} itn={self.config.use_itn}"
-            + (f" partial_every={every:g}s" if every else "")
-        )
+        return f"onnxruntime/{SENSE_VOICE_DIR}/model.int8.onnx {self.config.describe()}"
 
     def model_files(self) -> list[Path]:
         return list(self._paths.values())
 
     def create_stream(self) -> SenseVoiceStream:
-        return SenseVoiceStream(self._recognize_audio, self.config.partial_every_s)
+        return SenseVoiceStream(self._recognize_audio, self.config.schedule)

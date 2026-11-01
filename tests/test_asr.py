@@ -14,7 +14,15 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from src.asr import SAMPLE_RATE, AsrStream, StreamingAsr, available_models, load_asr
+from src.asr import (
+    SAMPLE_RATE,
+    AsrStream,
+    PartialSchedule,
+    StreamingAsr,
+    available_models,
+    load_asr,
+)
+from src.asr.sense_voice import SenseVoiceStream
 from src.asr.sherpa import X_ASR_480MS, ZIPFORMER_ZH_14M, SherpaTransducerAsr
 from src.asr.zipformer_ort import tokens_to_text
 from src.paths import MODELS_DIR
@@ -291,3 +299,51 @@ def test_x_asr_ort_matches_sherpa(model: str, blank_penalty: float) -> None:
         got = _transcribe_with_timestamps(ort_asr, wav)
         assert got[0] == expected[0], wav
         assert got[1] == pytest.approx(expected[1]), wav
+
+
+# ---------- 偽串流的重新辨識時機（不需模型） ----------
+
+
+def _decode_points(schedule: PartialSchedule | None, seconds: float, chunk_ms: int) -> list[float]:
+    """以 chunk_ms 送入 seconds 秒音訊，回傳每次重新辨識時已累積的秒數。"""
+    points: list[float] = []
+
+    def recognize(audio: npt.NDArray[np.float32]) -> str:
+        points.append(len(audio) / SAMPLE_RATE)
+        return "字" * len(points)
+
+    stream = SenseVoiceStream(recognize, schedule)
+    for chunk in _chunks(np.zeros(int(seconds * SAMPLE_RATE), dtype=np.float32), chunk_ms):
+        stream.accept_waveform(chunk)
+    assert stream.num_decodes == len(points)
+    return points
+
+
+def test_partial_schedule_every_first_and_max() -> None:
+    assert _decode_points(None, 3.0, 10) == []
+    assert _decode_points(PartialSchedule(0.48), 2.0, 10) == pytest.approx([0.48, 0.96, 1.44, 1.92])
+    assert _decode_points(PartialSchedule(0.96, first_s=0.48), 3.0, 10) == pytest.approx(
+        [0.48, 1.44, 2.40]
+    )
+    assert _decode_points(PartialSchedule(0.48, max_s=1.5), 3.0, 10) == pytest.approx(
+        [0.48, 0.96, 1.44]
+    )
+    # 一次送入一大塊（例如恢復說話時重新解碼）：只辨識一次，之後的時機從目前長度往後排
+    assert _decode_points(PartialSchedule(0.48), 2.0, 2000) == pytest.approx([2.0])
+    with pytest.raises(ValueError):
+        PartialSchedule(0.0)
+
+
+def test_partial_schedule_text_and_finalize() -> None:
+    calls: list[int] = []
+
+    def recognize(audio: npt.NDArray[np.float32]) -> str:
+        calls.append(len(audio))
+        return f"{len(audio)}"
+
+    stream = SenseVoiceStream(recognize, PartialSchedule(0.48, max_s=0.5))
+    for chunk in _chunks(np.zeros(SAMPLE_RATE, dtype=np.float32), 10):
+        stream.accept_waveform(chunk)
+    assert stream.get_partial_result() == str(int(0.48 * SAMPLE_RATE))  # 超過 max_s 後不再更新
+    assert stream.finalize() == str(SAMPLE_RATE)  # finalize 一律整段辨識
+    assert len(calls) == 2
