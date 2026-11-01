@@ -95,3 +95,14 @@
 - 單句 CER 成對差（SenseVoice − X-ASR，500 ms）：−0.77 個百分點，95% CI [−1.89, +0.28]，**不顯著**（錯字 31 vs 42 / 1433 字）。
 - 不用偽 partial 時 SenseVoice 說話中沒有任何文字；A2 下若把暫定結果算進「第一次看到文字」，單句是 3528 ms（現行首字指標只計 partial，對非串流模型不公平，待改）。
 - 偽 partial 每次都重新辨識整段：連續集（合併的長句段）RTF 0.309，暫定結果要 266 / P90 492 ms 才算完。
+
+**SenseVoice 直接用 onnxruntime 1.31.1 推論**（`sensevoice-small-int8-ort`；2026-11-01，`16342bb`+）：與 sherpa-onnx 版在 300 句對齊集上逐句相同，CER、首字、結果延遲、RTF 與上表相同（差 < 2 ms / 0.015 RTF），只有記憶體不同。峰值 RSS 單句 / 連續（MB）：
+
+| 模型 | 500 ms | A2 |
+|---|---|---|
+| X-ASR（sherpa-onnx，ORT 1.28.2） | 534 / 534 | 536 / 538 |
+| SenseVoice + 偽 partial（sherpa-onnx，ORT 1.28.2） | 939 / 972 | 939 / 1006 |
+| **SenseVoice + 偽 partial（onnxruntime 1.31.1）** | **434 / 465** | **437 / 532** |
+| SenseVoice，無偽 partial（onnxruntime 1.31.1） | 428 / 465 | 430 / 520 |
+
+physical footprint（`scripts/probe_footprint.py`，不含評測框架）：SenseVoice（ORT 1.31.1）載入後 346 MB、解碼 3 / 5 / 30 s 音訊後 358 / 366 / 459 MB；X-ASR（sherpa-onnx）載入後 271 MB（載入時峰值 427）、之後約 279 MB。

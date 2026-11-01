@@ -881,3 +881,35 @@ zh-14M（30 句）：default 與 no-arena 都是載入後 190、peak 193 MB（�
 ### 要把這個代價真的拿掉
 
 sherpa-onnx 2.0.1（PyPI 最新）內附 ORT 1.28.2，只升級 Python 套件無法解決。可行做法：(1) 以 ORT ≥ 1.30 自行編譯 sherpa-onnx；(2) SenseVoice 改成直接用 onnxruntime 推論（需自行實作 80 維 fbank、LFR、CMVN 前處理與 CTC 解碼）；(3) 第三階段轉 Core ML 時重新量。不論哪種，都要再量推論時的 footprint，才能確認上面的估計。
+
+---
+
+## 2026-11-01　SenseVoice 改用 onnxruntime 1.31.1 直接推論
+
+環境同上；評測在 commit `16342bb` + 未提交的程式上執行，程式即本次提交的內容。
+
+### 做了什麼
+
+- `SenseVoiceOrtAsr`（`src/asr/sense_voice.py`）：照 sherpa-onnx 2.0.1 的實作重寫前處理與解碼，用專案依賴的 onnxruntime 以檔案路徑載入模型。fbank 用 kaldi-native-fbank 1.22.5（k2-fsa，Apache-2.0，sherpa-onnx 用的同一個函式庫；新增為專案依賴），80 維、hamming、dither 0、樣本 ×32768；LFR 7 / 6（`csrc/lfr.cc`：ceil(T/6) 個輸出，邊界重複首 / 末 frame）；CMVN 取自模型 metadata；CTC greedy（blank 0）後丟掉前 4 個 token。登記 `sensevoice-small-int8-ort`、`sensevoice-small-int8-ort-p480`。
+- `SenseVoiceStream` 改為接收「整段音訊 → 文字」的函式，兩個後端共用累積與偽 partial 的邏輯。
+
+### 驗證
+
+- **與 sherpa-onnx 版在 300 句對齊集上逐句完全相同**（300 / 300）；測試另比對兩個官方測試音訊，並檢查 LFR 的 frame 數。
+- 同樣的 100 句子集重跑：CER（2.16 / 2.15–2.29%）、首字（443 ms）、結果延遲（A2 385 / P90 454 ms）、RTF 都與 sherpa-onnx 版相同。
+
+### 記憶體
+
+| | footprint 載入後 | 解碼 3–5 s 後 | 解碼 30 s 後 | 評測峰值 RSS（單句 / 連續） |
+|---|---|---|---|---|
+| SenseVoice（sherpa-onnx，ORT 1.28.2） | 850 | 859–868 | 940 | 939 / 1006 |
+| **SenseVoice（onnxruntime 1.31.1）** | **346** | **358–366** | 459 | **437 / 532** |
+| X-ASR（sherpa-onnx，ORT 1.28.2） | 271（載入峰值 427） | 279 | 279 | 536 / 538 |
+
+- 先前估計的「改用新版 ORT 後約 330 MB」得到確認：載入後 346 MB，車載長度（3–5 s）的句子推論後 358–366 MB。
+- **SenseVoice（ORT 1.31.1）的峰值已低於目前的 X-ASR**：X-ASR 仍經 sherpa-onnx（ORT 1.28.2）載入，載入時峰值 427 MB、評測峰值 RSS 約 536 MB。兩者在同一個 ORT 版本下的公平比較，要等 X-ASR 也不經 sherpa-onnx 載入（B11 估計約 261–270 MB）。
+- SenseVoice 推論時 footprint 約隨音訊長度 +3.8 MB / 秒（attention 看整段），X-ASR 不隨長度增加；長語音時差距會拉大。
+
+### 結論
+
+記憶體翻倍是 sherpa-onnx 內附舊版 ORT 造成的，不是 SenseVoice 本身的代價。改用新版 ORT 後，SenseVoice 在車載短句上的記憶體與 X-ASR 相當，剩下的代價主要是偽 partial 的計算量（RTF 0.107 / 0.32）與授權。

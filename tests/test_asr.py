@@ -225,3 +225,26 @@ def test_sense_voice_has_no_partial_unless_requested(sense_voice: StreamingAsr) 
 def test_sense_voice_rejects_blank_penalty() -> None:
     with pytest.raises(ValueError, match="blank_penalty"):
         load_asr("sensevoice-small-int8", blank_penalty=1.0)
+
+
+@pytest.mark.parametrize("wav", sorted(REFERENCES))
+def test_sense_voice_ort_matches_sherpa(sense_voice: StreamingAsr, wav: str) -> None:
+    # 直接用 onnxruntime 的版本：前處理與解碼照 sherpa-onnx 實作，結果要逐字相同（300 句對齊集也逐句相同）
+    ort_asr = load_asr("sensevoice-small-int8-ort", num_threads=1)
+    assert _transcribe(ort_asr, TEST_WAVS / wav) == _transcribe(sense_voice, TEST_WAVS / wav)
+
+
+def test_sense_voice_ort_lfr_shape_and_edges() -> None:
+    from src.asr import SenseVoiceOrtAsr
+
+    try:
+        asr = load_asr("sensevoice-small-int8-ort", num_threads=1)
+    except FileNotFoundError:
+        pytest.skip("SenseVoice 未下載，請先執行 bash scripts/download_models.sh")
+    assert isinstance(asr, SenseVoiceOrtAsr)
+    # 1 s 音訊：snip_edges 下 fbank 98 個 frame → LFR ceil(98 / 6) = 17 個 560 維 frame
+    feats = asr.features(
+        np.random.default_rng(0).standard_normal(SAMPLE_RATE).astype(np.float32) * 0.1
+    )
+    assert feats.shape == (17, 560)
+    assert asr.features(np.zeros(100, dtype=np.float32)).shape == (0, 560)  # 不足一個 frame

@@ -10,7 +10,7 @@
 from collections.abc import Callable
 
 from src.asr.base import AsrStream, StreamingAsr
-from src.asr.sense_voice import SenseVoiceAsr, SenseVoiceConfig
+from src.asr.sense_voice import SenseVoiceAsr, SenseVoiceConfig, SenseVoiceOrtAsr
 from src.asr.sherpa import (
     X_ASR_160MS,
     X_ASR_480MS,
@@ -28,6 +28,7 @@ __all__ = [
     "AsrStream",
     "SenseVoiceAsr",
     "SenseVoiceConfig",
+    "SenseVoiceOrtAsr",
     "SherpaTransducerAsr",
     "SherpaTransducerConfig",
     "StreamingAsr",
@@ -60,11 +61,14 @@ def _transducer(name: str) -> Callable[[int, float], StreamingAsr]:
     )
 
 
-def _sense_voice(partial_every_s: float | None) -> Callable[[int, float], StreamingAsr]:
+def _sense_voice(
+    partial_every_s: float | None, ort: bool = False
+) -> Callable[[int, float], StreamingAsr]:
     def factory(threads: int, blank_penalty: float) -> StreamingAsr:
         if blank_penalty:
             raise ValueError("blank_penalty 只適用於 transducer 模型")
-        return SenseVoiceAsr(SenseVoiceConfig(num_threads=threads, partial_every_s=partial_every_s))
+        config = SenseVoiceConfig(num_threads=threads, partial_every_s=partial_every_s)
+        return SenseVoiceOrtAsr(config) if ort else SenseVoiceAsr(config)
 
     return factory
 
@@ -75,6 +79,9 @@ _REGISTRY: dict[str, Callable[[int, float], StreamingAsr]] = {
     "sensevoice-small-int8": _sense_voice(None),
     # 同上，但每累積 0.48 s 音訊就整段重新辨識一次當 partial（與 X-ASR 480 ms 的更新頻率相同）
     "sensevoice-small-int8-p480": _sense_voice(0.48),
+    # 同一個模型直接用 onnxruntime（專案依賴的版本）推論，避開 sherpa-onnx 內附 ORT 1.28 的記憶體開銷
+    "sensevoice-small-int8-ort": _sense_voice(None, ort=True),
+    "sensevoice-small-int8-ort-p480": _sense_voice(0.48, ort=True),
 }
 
 

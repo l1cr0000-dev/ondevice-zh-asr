@@ -1,4 +1,8 @@
-"""sherpa-onnx 非串流 SenseVoice 後端。
+"""非串流 SenseVoice 後端：sherpa-onnx 版（`SenseVoiceAsr`）與直接用 onnxruntime 的版本（`SenseVoiceOrtAsr`）。
+
+兩者用同一個模型檔、同一套串流包裝（`SenseVoiceStream`），只差「整段辨識一次」怎麼做。
+onnxruntime 版存在的原因：sherpa-onnx 2.0.1 內附 ORT 1.28.2，載入 SenseVoice 時留下約 500 MB 的
+記憶體開銷（docs/progress.md 2026-11-01），直接用專案依賴的 onnxruntime（≥ 1.30）可以避開。
 
 非串流模型一次看完整段音訊才辨識，沒有真正的 partial。實作成 `AsrStream` 的方式：
 - `accept_waveform` 只累積音訊；`finalize` 時把累積的音訊整段辨識一次。
@@ -7,8 +11,10 @@
   None = 不產生 partial（首字要等到 finalize）。
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -32,9 +38,15 @@ class SenseVoiceConfig:
 
 
 class SenseVoiceStream(AsrStream):
-    def __init__(self, recognizer: "sherpa_onnx.OfflineRecognizer", partial_every_s: float | None):
+    """累積音訊；`recognize(整段音訊) → 文字` 由後端提供。"""
+
+    def __init__(
+        self,
+        recognize: Callable[[npt.NDArray[np.float32]], str],
+        partial_every_s: float | None,
+    ) -> None:
         super().__init__()
-        self._recognizer = recognizer
+        self._recognize = recognize
         self._chunks: list[npt.NDArray[np.float32]] = []
         self._n = 0  # 已累積的樣本數
         self._every = None if partial_every_s is None else int(partial_every_s * SAMPLE_RATE)
@@ -44,10 +56,7 @@ class SenseVoiceStream(AsrStream):
     def _decode(self) -> str:
         if not self._n:
             return ""
-        stream = self._recognizer.create_stream()
-        stream.accept_waveform(SAMPLE_RATE, np.concatenate(self._chunks))
-        self._recognizer.decode_stream(stream)
-        return str(stream.result.text)
+        return self._recognize(np.concatenate(self._chunks))
 
     def _accept(self, chunk: npt.NDArray[np.float32]) -> None:
         self._chunks.append(chunk.copy())
@@ -97,5 +106,121 @@ class SenseVoiceAsr(StreamingAsr):
     def model_files(self) -> list[Path]:
         return list(self._paths.values())
 
+    def _recognize_audio(self, audio: npt.NDArray[np.float32]) -> str:
+        stream = self._recognizer.create_stream()
+        stream.accept_waveform(SAMPLE_RATE, audio)
+        self._recognizer.decode_stream(stream)
+        return str(stream.result.text)
+
     def create_stream(self) -> SenseVoiceStream:
-        return SenseVoiceStream(self._recognizer, self.config.partial_every_s)
+        return SenseVoiceStream(self._recognize_audio, self.config.partial_every_s)
+
+
+class SenseVoiceOrtAsr(StreamingAsr):
+    """直接用 onnxruntime 跑 SenseVoice，前處理與解碼照 sherpa-onnx 2.0.1 的實作：
+
+    - fbank：kaldi-native-fbank（sherpa-onnx 用的同一個函式庫），80 維、hamming 窗、dither 0、
+      snip_edges；metadata `normalize_samples=0` 時樣本先乘 32768（int16 範圍）。
+      （`offline-recognizer-sense-voice-impl.h` 的 InitFeatConfig）
+    - LFR：每 6 個 frame 取一次、拼接以它為中心的 7 個 frame（左 3 右 3，超出邊界重複首 / 末 frame），
+      輸出 ceil(T / 6) 個 560 維 frame（`csrc/lfr.cc`）。之後 CMVN：(x + neg_mean) * inv_stddev。
+    - 模型輸入另有 language（metadata `lang_<語言>`）與 text_norm（with_itn / without_itn）。
+    - CTC greedy：逐 frame argmax、合併重複、去掉 blank（id 0），再丟掉前 4 個 token
+      （語言、情緒、事件、ITN 標記）。token 中的「▁」換成空白。
+    """
+
+    def __init__(self, config: SenseVoiceConfig | None = None, models_dir: Path = MODELS_DIR):
+        import kaldi_native_fbank as knf  # type: ignore[import-untyped]
+        import onnxruntime as ort  # type: ignore[import-untyped]
+
+        self.config = config or SenseVoiceConfig()
+        root = models_dir / SENSE_VOICE_DIR
+        self._paths = {"model": root / "model.int8.onnx", "tokens": root / "tokens.txt"}
+        missing = [str(p) for p in self._paths.values() if not p.is_file()]
+        if missing:
+            raise FileNotFoundError(
+                "找不到模型檔，請先執行 bash scripts/download_models.sh：\n  "
+                + "\n  ".join(missing)
+            )
+        opts: Any = ort.SessionOptions()
+        opts.intra_op_num_threads = self.config.num_threads
+        opts.inter_op_num_threads = 1
+        # 以檔案路徑建立 session（不先讀進記憶體），見模組說明
+        self._session: Any = ort.InferenceSession(
+            str(self._paths["model"]), opts, providers=["CPUExecutionProvider"]
+        )
+        meta = self._session.get_modelmeta().custom_metadata_map
+        self._lfr_m = int(meta["lfr_window_size"])
+        self._lfr_n = int(meta["lfr_window_shift"])
+        self._neg_mean = np.array(meta["neg_mean"].split(","), dtype=np.float32)
+        self._inv_std = np.array(meta["inv_stddev"].split(","), dtype=np.float32)
+        self._scale = 1.0 if int(meta["normalize_samples"]) else 32768.0
+        self._language = np.array([int(meta[f"lang_{self.config.language}"])], dtype=np.int32)
+        itn = meta["with_itn"] if self.config.use_itn else meta["without_itn"]
+        self._text_norm = np.array([int(itn)], dtype=np.int32)
+        self._tokens: dict[int, str] = {}
+        for line in self._paths["tokens"].read_text(encoding="utf-8").splitlines():
+            sym, idx = line.rsplit(" ", 1)
+            self._tokens[int(idx)] = sym
+        fbank = knf.FbankOptions()
+        fbank.frame_opts.samp_freq = SAMPLE_RATE
+        fbank.frame_opts.dither = 0.0
+        fbank.frame_opts.window_type = "hamming"
+        fbank.frame_opts.snip_edges = True
+        fbank.mel_opts.num_bins = 80
+        fbank.mel_opts.high_freq = 0
+        self._fbank_opts = fbank
+        self._knf = knf
+
+    def features(self, audio: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
+        """整段音訊 → LFR + CMVN 後的 (T', 560) 特徵。"""
+        fbank = self._knf.OnlineFbank(self._fbank_opts)
+        fbank.accept_waveform(SAMPLE_RATE, (audio * self._scale).tolist())
+        fbank.input_finished()
+        n = fbank.num_frames_ready
+        if n == 0:
+            return np.zeros((0, 80 * self._lfr_m), dtype=np.float32)
+        feats = np.stack([np.asarray(fbank.get_frame(i), dtype=np.float32) for i in range(n)])
+        out_frames = 1 + (n - 1) // self._lfr_n
+        idx = np.arange(out_frames)[:, None] * self._lfr_n - (self._lfr_m - 1) // 2
+        idx = np.clip(idx + np.arange(self._lfr_m)[None, :], 0, n - 1)
+        lfr = feats[idx].reshape(out_frames, -1)
+        out: npt.NDArray[np.float32] = ((lfr + self._neg_mean) * self._inv_std).astype(np.float32)
+        return out
+
+    def _recognize_audio(self, audio: npt.NDArray[np.float32]) -> str:
+        x = self.features(audio)
+        if not len(x):
+            return ""
+        (logits,) = self._session.run(
+            ["logits"],
+            {
+                "x": x[None],
+                "x_length": np.array([len(x)], dtype=np.int32),
+                "language": self._language,
+                "text_norm": self._text_norm,
+            },
+        )
+        ids = logits[0].argmax(axis=-1)
+        tokens: list[int] = []
+        prev = -1
+        for y in ids.tolist():
+            if y != 0 and y != prev:
+                tokens.append(y)
+            prev = y
+        return "".join(self._tokens[t] for t in tokens[4:]).replace("▁", " ").strip()
+
+    @property
+    def name(self) -> str:
+        every = self.config.partial_every_s
+        return (
+            f"onnxruntime/{SENSE_VOICE_DIR}/model.int8.onnx threads={self.config.num_threads}"
+            f" language={self.config.language} itn={self.config.use_itn}"
+            + (f" partial_every={every:g}s" if every else "")
+        )
+
+    def model_files(self) -> list[Path]:
+        return list(self._paths.values())
+
+    def create_stream(self) -> SenseVoiceStream:
+        return SenseVoiceStream(self._recognize_audio, self.config.partial_every_s)
