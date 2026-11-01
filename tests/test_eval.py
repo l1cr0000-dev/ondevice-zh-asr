@@ -8,7 +8,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from eval.metrics import bootstrap_cer_ci, corpus_cer, summarize, utterance_counts
+from eval.metrics import (
+    bootstrap_cer_ci,
+    corpus_cer,
+    paired_bootstrap_cer_diff,
+    summarize,
+    utterance_counts,
+)
 from eval.run_eval import RunConfig, cer_confidence, summarize_run
 from eval.text_norm import normalize, tokenize
 from src.vad import DEFAULT_MODEL_PATH
@@ -83,6 +89,19 @@ def test_bootstrap_ci_contains_estimate_and_is_reproducible() -> None:
     lo, hi = bootstrap_cer_ci(list(errors), list(refs), n_resamples=2000)
     assert lo < point < hi and hi - lo < 0.05
     assert (lo, hi) == bootstrap_cer_ci(list(errors), list(refs), n_resamples=2000)
+
+
+def test_paired_bootstrap_cer_diff() -> None:
+    refs = [10] * 50
+    a = [1] * 50
+    diff, lo, hi = paired_bootstrap_cer_diff(a, a, refs, n_resamples=500)
+    assert diff == lo == hi == 0.0  # 逐句相同 → 差為 0，區間退化
+    b = [2] * 25 + [1] * 25  # B 在一半的句子多錯 1 字
+    diff, lo, hi = paired_bootstrap_cer_diff(a, b, refs, n_resamples=2000)
+    assert diff == pytest.approx(25 / 500)
+    assert 0 < lo < diff < hi
+    with pytest.raises(ValueError):
+        paired_bootstrap_cer_diff(a, b[:-1], refs)
 
 
 def test_bootstrap_ci_by_group_is_wider_when_groups_differ() -> None:

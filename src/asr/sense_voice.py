@@ -123,7 +123,36 @@ class SenseVoiceStream(AsrStream):
         return self._decode()
 
 
-class SenseVoiceAsr(StreamingAsr):
+class _WholeUtteranceAsr(StreamingAsr):
+    """兩個後端共用：整段辨識的計數（`compute_stats`）與建立 `SenseVoiceStream`。"""
+
+    config: SenseVoiceConfig
+    _num_decodes = 0
+    _decoded_s = 0.0
+
+    def _recognize_audio(self, audio: npt.NDArray[np.float32]) -> str:
+        raise NotImplementedError
+
+    def _counted(self, audio: npt.NDArray[np.float32]) -> str:
+        self._num_decodes += 1
+        self._decoded_s += len(audio) / SAMPLE_RATE
+        return self._recognize_audio(audio)
+
+    def compute_stats(self) -> dict[str, float]:
+        return {
+            "num_decodes": self._num_decodes,
+            "decoded_audio_s": self._decoded_s,
+        }
+
+    def reset_compute_stats(self) -> None:
+        self._num_decodes = 0
+        self._decoded_s = 0.0
+
+    def create_stream(self) -> SenseVoiceStream:
+        return SenseVoiceStream(self._counted, self.config.schedule)
+
+
+class SenseVoiceAsr(_WholeUtteranceAsr):
     def __init__(self, config: SenseVoiceConfig | None = None, models_dir: Path = MODELS_DIR):
         self.config = config or SenseVoiceConfig()
         root = models_dir / SENSE_VOICE_DIR
@@ -158,11 +187,8 @@ class SenseVoiceAsr(StreamingAsr):
         self._recognizer.decode_stream(stream)
         return str(stream.result.text)
 
-    def create_stream(self) -> SenseVoiceStream:
-        return SenseVoiceStream(self._recognize_audio, self.config.schedule)
 
-
-class SenseVoiceOrtAsr(StreamingAsr):
+class SenseVoiceOrtAsr(_WholeUtteranceAsr):
     """直接用 onnxruntime 跑 SenseVoice，前處理與解碼照 sherpa-onnx 2.0.1 的實作：
 
     - fbank：kaldi-native-fbank（sherpa-onnx 用的同一個函式庫），80 維、hamming 窗、dither 0、
@@ -262,6 +288,3 @@ class SenseVoiceOrtAsr(StreamingAsr):
 
     def model_files(self) -> list[Path]:
         return list(self._paths.values())
-
-    def create_stream(self) -> SenseVoiceStream:
-        return SenseVoiceStream(self._recognize_audio, self.config.schedule)

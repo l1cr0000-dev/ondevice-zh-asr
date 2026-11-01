@@ -347,3 +347,19 @@ def test_partial_schedule_text_and_finalize() -> None:
     assert stream.get_partial_result() == str(int(0.48 * SAMPLE_RATE))  # 超過 max_s 後不再更新
     assert stream.finalize() == str(SAMPLE_RATE)  # finalize 一律整段辨識
     assert len(calls) == 2
+
+
+def test_sense_voice_compute_stats_count_every_decode() -> None:
+    try:
+        asr = load_asr("sensevoice-small-int8-ort-p480", num_threads=1)
+    except FileNotFoundError:
+        pytest.skip("SenseVoice 未下載，請先執行 bash scripts/download_models.sh")
+    assert asr.compute_stats() == {"num_decodes": 0, "decoded_audio_s": 0.0}
+    stream = asr.create_stream()
+    for chunk in _chunks(np.zeros(SAMPLE_RATE, dtype=np.float32), 10):
+        stream.accept_waveform(chunk)
+    stream.finalize()
+    # 0.48 / 0.96 s 兩次偽 partial + finalize 整段 1 s
+    assert asr.compute_stats() == pytest.approx({"num_decodes": 3, "decoded_audio_s": 2.44})
+    asr.reset_compute_stats()
+    assert asr.compute_stats() == {"num_decodes": 0, "decoded_audio_s": 0.0}

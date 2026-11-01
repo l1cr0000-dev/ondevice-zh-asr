@@ -148,6 +148,7 @@ def worker(cfg: RunConfig, shard: int = 0, num_shards: int = 1) -> dict[str, Any
 
     for row in rows[: cfg.warmup]:
         run(manifest_path.parent / row["wav"])
+    asr.reset_compute_stats()  # 計算量統計不含暖機（與 RTF 不同，暖機句子不重複計入）
 
     results: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
@@ -203,6 +204,7 @@ def worker(cfg: RunConfig, shard: int = 0, num_shards: int = 1) -> dict[str, Any
 
     return {
         "asr_name": asr.name,
+        "asr_compute": asr.compute_stats(),
         "load_s": load_s,
         "memory_mb": {
             "baseline_rss": rss_baseline,
@@ -358,6 +360,15 @@ def summarize_run(
             "cer_ci95": cer_confidence(utts),
             "cer_counts": asdict(cer),
             "rtf": total_compute / total_processed,
+            # 後端提供時：重新辨識的次數與音訊總長，及其相對送入音訊（含補靜音）的比例，與機器負載無關
+            "asr_compute": (
+                None
+                if raw.get("asr_compute") is None
+                else {
+                    **raw["asr_compute"],
+                    "decoded_audio_ratio": raw["asr_compute"]["decoded_audio_s"] / total_processed,
+                }
+            ),
             "first_token_latency_ms": summarize(first_token_ms),
             "e2e_first_token_latency_ms": summarize(e2e_first_token_ms),
             "no_text_utterances": len(utts) - len(first_token_ms),
@@ -402,6 +413,11 @@ def merge_shards(parts: list[dict[str, Any]]) -> dict[str, Any]:
     first = parts[0]
     return {
         "asr_name": first["asr_name"],
+        "asr_compute": (
+            None
+            if first.get("asr_compute") is None
+            else {k: sum(p["asr_compute"][k] for p in parts) for k in first["asr_compute"]}
+        ),
         "load_s": max(p["load_s"] for p in parts),
         "memory_mb": {k: max(p["memory_mb"][k] for p in parts) for k in first["memory_mb"]},
         "model_files": first["model_files"],
