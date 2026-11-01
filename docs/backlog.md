@@ -114,6 +114,7 @@
   - `EnableCpuMemArena=0`（經 sherpa-onnx provider 設定檔）：載入與峰值都在 ±1 MB 內，**無效**。關 prepacking 只少約 7 MB；關圖最佳化反而多 144 MB。
   - 同樣三個檔案直接用 onnxruntime 1.31.1 載入只增加約 245 MB。**已查明**（vmmap，見 progress.md）：多出的約 190 MB 不是重複的權重，存活配置量兩邊相同（219 vs 205 MB），差別是 sherpa-onnx 2.0.1 內附的 ORT 1.28.2 在載入時留下約 183 MB 已釋放但未歸還的 malloc 碎片。onnxruntime 1.28.0 / 1.29.0 直接載入可重現（碎片 192 / 188 MB），1.30.0 起降到約 34 MB。sherpa-onnx 2.0.1 已是 PyPI 最新版。
   - 評測時峰值 RSS 隨句數增加（X-ASR 200 句 531 MB → 3000 句 618 MB；zh-14M 252 → 333 MB），但單獨解碼 100 → 1000 句只增加 3 MB，增加的部分在評測 / pipeline 端，原因未查。這讓「峰值 RSS」指標混入了評測框架本身，違背 CLAUDE.md 的量測原則。
+- **2026-11-01 SenseVoice**（`scripts/probe_footprint.py`，progress.md）：經 sherpa-onnx 載入後 footprint 850 MB（X-ASR 270），其中約 500 MB 是 ORT 1.28 的載入開銷；同一檔案用 ORT 1.31.1 直接載入只要 +308 MB。改用 ORT ≥ 1.30 後 SenseVoice 與 X-ASR 的差距估計從約 580 MB 縮到約 60 MB（未含推論，推論時約 +3 MB / 秒音訊）。
 - **做法**：(1) 等 sherpa-onnx 改用 ORT ≥ 1.30，或自行以較新的 ORT 編譯 sherpa-onnx，再用 `probe_memory.py` 對比；iOS 端以 phys_footprint（jetsam 依據）而非 RSS 為準；(2) 在 worker 中每 N 句取樣 RSS，找出評測端的增長來源並修正，讓峰值 RSS 與句數無關；(3) 第二階段量化與 Core ML 轉換時一併對比記憶體與體積。
 
 ---

@@ -840,3 +840,44 @@ zh-14M（30 句）：default 與 no-arena 都是載入後 190、peak 193 MB（�
 
 - 100 句不足以判定 CER 差異，需要 3000 句（只看 CER 可用 `--jobs 4`）。
 - 偽 partial 的計算量隨句長平方成長，長句或連續說話時的最壞情況未量。
+
+---
+
+## 2026-11-01　SenseVoice 記憶體追查（B11）
+
+環境同上；commit `2824385` + 未提交的程式（`scripts/probe_footprint.py`，即本次提交）。全部在專案環境（Python 3.11.15）執行，重複 3 次數字相差 < 5 MB。
+
+問題：評測時 SenseVoice 峰值 RSS 約 940–1010 MB，X-ASR 約 535 MB。多出來的是模型必需，還是可以省掉？
+
+方法：`uv run scripts/probe_footprint.py`，在同一程序內以 `vmmap --summary` 分階段記錄 RSS、physical footprint（iOS jetsam 的依據）、malloc 存活配置與碎片（已釋放未歸還）；`--ort-direct` 用指定版本的 onnxruntime 直接載入 `model.int8.onnx`（228 MB）。
+
+**經專案後端載入（sherpa-onnx 2.0.1，內附 ORT 1.28.2），MB**
+
+| 階段 | SenseVoice footprint | malloc 存活 / 碎片 | X-ASR footprint | malloc 存活 / 碎片 |
+|---|---|---|---|---|
+| import 後 | 24 | 7 / 2 | 23 | 7 / 2 |
+| 載入後 | **850** | 497 / **314** | 270（載入時峰值 429） | 223 / 186 |
+| 解碼 3 s 後 | 859 | 519 / 313 | 282 | 255 / 176 |
+| 解碼 10 s 後 | 886 | 570 / 288 | 282 | 256 / 176 |
+| 解碼 30 s 後 | 941 | 641 / 272 | 283 | 259 / 178 |
+
+**直接用 onnxruntime 載入 SenseVoice（只載入，不推論），相對載入前的增量，MB**
+
+| ORT | 載入方式 | Δfootprint | footprint 峰值 | Δmalloc 存活 | Δ碎片 |
+|---|---|---|---|---|---|
+| 1.28.0 | 檔案路徑 | 817 | 853 | 483 | 309 |
+| 1.31.1（專案依賴） | 檔案路徑 | **308** | **336** | 255 | 24 |
+| 1.28.0 | 先讀進記憶體 | 1304 | 1331 | 709 | 311 |
+| 1.31.1 | 先讀進記憶體 | 760 | 788 | 483 | 24 |
+
+「先讀進記憶體」是 Python 端以 bytes 建 session：onnxruntime 的 Python 包裝會保留這份 bytes，多了一份模型大小的存活配置，不能直接代表 sherpa-onnx（C++ 讀檔建 session 後釋放緩衝，`csrc/offline-sense-voice-model.cc`）。
+
+### 結論
+
+1. **SenseVoice 載入後的 850 MB 中，約 500 MB 是 ORT 1.28 的載入開銷，不是模型必需。** 同一個檔案用 ORT 1.28.0 載入 footprint +817 MB，與 sherpa-onnx（內附 1.28.2）的 826 MB 幾乎相同；用 ORT 1.31.1 只要 +308 MB（峰值 336），碎片 309 → 24 MB、存活配置 483 → 255 MB。和 X-ASR 的情況（B11，2026-10-30）同一個原因，只是 SenseVoice 是單一 228 MB 的大檔，放大得更明顯。
+2. **用 ORT ≥ 1.30 時，SenseVoice 的載入代價估計約 330 MB footprint**（import 24 + 308），X-ASR 用 ORT 1.31.1 直接載入約 261–270 MB（B11）。兩者差距從約 580 MB 縮小到約 60 MB。這是只載入、未推論的數字，SenseVoice 推論時另外隨音訊長度增加（經 sherpa-onnx 實測約 3 MB / 秒音訊，30 s 音訊約 +90 MB；車載 1–3 s 的短句約 +10 MB）。
+3. 用 Python 3.13 環境量到的數字（Δfootprint 150–225 MB 等）與 3.11 不同且不穩定，不採用；記憶體數字要在同一個 Python 版本下比較。
+
+### 要把這個代價真的拿掉
+
+sherpa-onnx 2.0.1（PyPI 最新）內附 ORT 1.28.2，只升級 Python 套件無法解決。可行做法：(1) 以 ORT ≥ 1.30 自行編譯 sherpa-onnx；(2) SenseVoice 改成直接用 onnxruntime 推論（需自行實作 80 維 fbank、LFR、CMVN 前處理與 CTC 解碼）；(3) 第三階段轉 Core ML 時重新量。不論哪種，都要再量推論時的 footprint，才能確認上面的估計。
