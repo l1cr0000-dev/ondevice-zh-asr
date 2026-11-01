@@ -183,3 +183,45 @@ def test_streams_are_independent(asr: StreamingAsr) -> None:
     assert b.get_partial_result() == ""
     assert b.finalize() == ""
     assert a.finalize() == expected
+
+
+# ---------- 非串流 SenseVoice ----------
+
+
+@pytest.fixture(scope="module")
+def sense_voice() -> StreamingAsr:
+    try:
+        return load_asr("sensevoice-small-int8", num_threads=1)
+    except FileNotFoundError:
+        pytest.skip("SenseVoice 未下載，請先執行 bash scripts/download_models.sh")
+
+
+@pytest.mark.parametrize("wav", sorted(REFERENCES))
+def test_sense_voice_cer_and_chunk_independence(sense_voice: StreamingAsr, wav: str) -> None:
+    # 兩句皆 0/N（language=auto，含語氣詞）
+    results = {ms: _transcribe(sense_voice, TEST_WAVS / wav, ms) for ms in (10, 320, 100_000)}
+    assert len(set(results.values())) == 1, results
+    assert jiwer.cer(REFERENCES[wav], results[10]) <= 0.05
+
+
+def test_sense_voice_has_no_partial_unless_requested(sense_voice: StreamingAsr) -> None:
+    audio = load_wav(TEST_WAVS / "0.wav")
+    stream = sense_voice.create_stream()
+    for chunk in _chunks(audio, 10):
+        stream.accept_waveform(chunk)
+    assert stream.get_partial_result() == ""
+    assert stream.finalize()
+
+    pseudo = load_asr("sensevoice-small-int8-p480", num_threads=1).create_stream()
+    partials = []
+    for chunk in _chunks(
+        audio[: SAMPLE_RATE * 2], 10
+    ):  # 2 s：0.48 / 0.96 / 1.44 / 1.92 s 各重新辨識一次
+        pseudo.accept_waveform(chunk)
+        partials.append(pseudo.get_partial_result())
+    assert partials[-1] and len(set(partials)) >= 2
+
+
+def test_sense_voice_rejects_blank_penalty() -> None:
+    with pytest.raises(ValueError, match="blank_penalty"):
+        load_asr("sensevoice-small-int8", blank_penalty=1.0)

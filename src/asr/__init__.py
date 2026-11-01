@@ -10,6 +10,7 @@
 from collections.abc import Callable
 
 from src.asr.base import AsrStream, StreamingAsr
+from src.asr.sense_voice import SenseVoiceAsr, SenseVoiceConfig
 from src.asr.sherpa import (
     X_ASR_160MS,
     X_ASR_480MS,
@@ -25,6 +26,8 @@ __all__ = [
     "SAMPLE_RATE",
     "TRANSDUCER_SPECS",
     "AsrStream",
+    "SenseVoiceAsr",
+    "SenseVoiceConfig",
     "SherpaTransducerAsr",
     "SherpaTransducerConfig",
     "StreamingAsr",
@@ -57,8 +60,21 @@ def _transducer(name: str) -> Callable[[int, float], StreamingAsr]:
     )
 
 
+def _sense_voice(partial_every_s: float | None) -> Callable[[int, float], StreamingAsr]:
+    def factory(threads: int, blank_penalty: float) -> StreamingAsr:
+        if blank_penalty:
+            raise ValueError("blank_penalty 只適用於 transducer 模型")
+        return SenseVoiceAsr(SenseVoiceConfig(num_threads=threads, partial_every_s=partial_every_s))
+
+    return factory
+
+
 _REGISTRY: dict[str, Callable[[int, float], StreamingAsr]] = {
-    name: _transducer(name) for name in TRANSDUCER_SPECS
+    **{name: _transducer(name) for name in TRANSDUCER_SPECS},
+    # 非串流：說話中沒有 partial，首字要等到 finalize（VAD 結束或暫定結果）
+    "sensevoice-small-int8": _sense_voice(None),
+    # 同上，但每累積 0.48 s 音訊就整段重新辨識一次當 partial（與 X-ASR 480 ms 的更新頻率相同）
+    "sensevoice-small-int8-p480": _sense_voice(0.48),
 }
 
 

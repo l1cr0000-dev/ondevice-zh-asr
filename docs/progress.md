@@ -811,3 +811,32 @@ zh-14M（30 句）：default 與 no-arena 都是載入後 190、peak 193 MB（�
 ### 可選的折衷：A2 + 定稿時重新解碼
 
 停頓後沒有恢復、到 min_silence 定稿時，再以完整緩衝（含長靜音）重新解碼一次當最終結果，最終文字即與 A 相同（CER 3.70%）。暫定結果延遲不變（約 300 ms），定稿晚約一次重新解碼的時間，計算量約回到 A 的水準。未實作。
+
+---
+
+## 2026-11-01　非串流模型對照：SenseVoice Small（小樣本）
+
+環境同上；評測在 commit `8e9b618` + 未提交的程式上執行，程式即本次提交的內容。數字在 [scoreboard.md](scoreboard.md)「模型對照」一節。
+
+### 做了什麼
+
+- `scripts/download_models.sh` 加入 `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17`（SHA-256 校驗）；來源、訓練資料（未公開，是否含 AISHELL-1 未知）與授權（FunASR Model License v1.1，未明文提到商業用途）寫進 [models.md](models.md)。
+- `src/asr/sense_voice.py`：非串流後端，`accept_waveform` 只累積音訊、`finalize` 整段辨識；選用 `partial_every_s` 定期整段重新辨識當偽 partial。登記 `sensevoice-small-int8`、`sensevoice-small-int8-p480`（0.48 s）。language auto、不做 ITN。
+- 依要求先用小樣本：對齊集前 100 句、連續集前 25 條（100 句），X-ASR 與兩種 SenseVoice 各跑 500 ms 與 A2。
+
+### 結果
+
+- **CER**：SenseVoice 單句 2.16% vs X-ASR 2.93%，成對差 −0.77 個百分點 [−1.89, +0.28]，100 句上**不顯著**；連續集 2.15 vs 2.36%（A2）。
+- **首字延遲**：沒有偽 partial 時說話中沒有文字，首字約 4.4 s（≈ 整句長度 + 靜音門檻）。加偽 partial 後 **443 ms**，比 X-ASR 的 1061 ms 快約 620 ms：沒有 chunk 與右側 context 的等待，也沒有串流模型的輸出延遲。
+- **說完 → 完整結果**（A2）：SenseVoice 368 ms vs X-ASR 296 ms，整句辨識（112 ms）比 X-ASR 的補零 finalize（49 ms）慢。
+- **計算量**：偽 partial 每次重新辨識整段，單句 RTF 0.107、連續集（合併成長句段）0.309，X-ASR A2 為 0.029 / 0.057。
+- **記憶體**：SenseVoice 峰值 RSS 940–1013 MB，X-ASR 約 535 MB；模型 230.7 vs 163.6 MB。
+
+### 指標缺口
+
+首字延遲只計 partial。X-ASR 一定先有 partial，沒有影響；非串流模型在 A2 下的第一個可見文字是暫定結果（單句 3528 ms），現行指標顯示 5035 ms。應改為「第一次看到文字 = partial 或暫定結果，取早者」。
+
+### 待確認
+
+- 100 句不足以判定 CER 差異，需要 3000 句（只看 CER 可用 `--jobs 4`）。
+- 偽 partial 的計算量隨句長平方成長，長句或連續說話時的最壞情況未量。

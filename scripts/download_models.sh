@@ -32,11 +32,18 @@
 #     版本：sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05（release tag asr-models）
 #     來源、訓練資料、授權：同上 480 ms 版（同一個模型系列，只有 chunk 大小不同）
 #     檔案：models/sherpa-onnx-x-asr-160ms-streaming-zipformer-transducer-zh-en-int8-2026-06-05/
+#
+#   SenseVoice Small（非串流，中英日韓粵，INT8 版；評測對照用，見 docs/models.md）
+#     版本：sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17（release tag asr-models）
+#     來源：https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
+#           原始模型 https://github.com/FunAudioLLM/SenseVoice
+#     訓練資料與授權：見 docs/models.md
+#     檔案：models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17/（model.int8.onnx、tokens.txt）
 
 set -euo pipefail
 
 usage() {
-    sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 FORCE=0
@@ -125,5 +132,11 @@ fetch_archive \
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${X_ASR_160MS}.tar.bz2" \
     "$X_ASR_160MS" \
     "bdf2c0f2474d34bf479871b0f298c74a6f6bf15f24a492dc5401aa3041811915"
+
+SENSE_VOICE="sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
+fetch_archive \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/${SENSE_VOICE}.tar.bz2" \
+    "$SENSE_VOICE" \
+    "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e"
 
 echo "全部模型就緒：$MODELS_DIR"

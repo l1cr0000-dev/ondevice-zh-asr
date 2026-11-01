@@ -10,6 +10,7 @@
 |---|---|---|---|---|
 | X-ASR-zh-en（480 / 160 ms 串流，INT8） | Apache-2.0 | 約 100 萬小時「開源及收集」語音，資料集清單未公開 | **未知** | **未知** |
 | zipformer-zh-14M-2023-02-23 | Apache-2.0 | WenetSpeech（文件明寫「只用 WenetSpeech」，子集與時數未寫） | 否（依文件） | 否（依文件） |
+| SenseVoice Small（非串流，INT8；2026-11-01 加入，評測對照用） | FunASR Model Open Source License v1.1（見下） | SenseVoice 整體工作「超過 40 萬小時」，Small 的資料集清單未公開 | **未知** | **未知** |
 | Silero VAD v6.2.3 | MIT | 不在本次調查範圍 | – | – |
 | 評測資料 AISHELL-1 test | Apache-2.0 | – | – | – |
 
@@ -71,6 +72,24 @@ README 的評測表涵蓋 LibriSpeech、GigaSpeech、WenetSpeech（net / meeting
 ### 授權
 
 兩個 Hugging Face repo 的模型卡 metadata 都是 `license: apache-2.0`；sherpa-onnx 壓縮檔內 README 同樣是 `license: apache-2.0`。WenetSpeech 資料集本身在 OpenSLR 上標示為 CC BY 4.0（https://www.openslr.org/121/），下載需填申請表取得密碼。
+
+## SenseVoice Small
+
+查證日期 2026-11-01。本專案使用的檔案：sherpa-onnx release `asr-models` 中的 `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2`（163 MB，SHA-256 `7d1efa21…`，取自 GitHub release 頁面的 digest），解壓後 `model.int8.onnx` 228 MB、`tokens.txt`。同一 release 另有 `…-int8-2025-09-09` 版，未採用（與原始 SenseVoiceSmall 的差異未查）。壓縮檔內 README 只寫「converted from https://github.com/FunAudioLLM/SenseVoice」；LICENSE 只有一行「Ref to https://github.com/modelscope/FunASR?tab=readme-ov-file#license」。
+
+| 來源 | 連結 |
+|---|---|
+| 原始模型 | https://github.com/FunAudioLLM/SenseVoice （程式碼 MIT；權重依各模型卡，官方 SenseVoiceSmall 模型卡連到 FunASR MODEL_LICENSE） |
+| 模型授權 | https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE （FunASR Model Open Source License Agreement v1.1） |
+
+### 訓練資料
+
+- SenseVoice repo 只寫整體工作「training on more than 400,000 hours」，沒有對應到釋出的 Small checkpoint，也沒有資料集清單。
+- AISHELL-1 / AISHELL-2 只出現在評測比較中（結果是圖片），沒有說是否用於訓練。是否含 AISHELL-1 train / test：**未知**。與 X-ASR 相同，AISHELL-1 上的 CER 不能當作泛化能力。
+
+### 授權
+
+FunASR Model Open Source License v1.1：可使用、複製、修改、分享（含微調與衍生模型），須標明來源與作者並保留模型名稱；對 Alibaba 或軟體的「無根據的詆毀或惡意攻擊」會自動失去授權；軟體「僅供參考與學習」、不負責損失；協議可修訂、公布即生效；準據法欄位是未填的範本（「[Country/Region]」）。**未明文提到商業用途**。本專案只用於評測對照，模型檔不進 git；若之後要預設採用或在 iOS app 內散布，需再確認這份授權。
 
 ## Silero VAD v6.2.3
 
