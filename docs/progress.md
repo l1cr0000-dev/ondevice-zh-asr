@@ -913,3 +913,46 @@ sherpa-onnx 2.0.1（PyPI 最新）內附 ORT 1.28.2，只升級 Python 套件無
 ### 結論
 
 記憶體翻倍是 sherpa-onnx 內附舊版 ORT 造成的，不是 SenseVoice 本身的代價。改用新版 ORT 後，SenseVoice 在車載短句上的記憶體與 X-ASR 相當，剩下的代價主要是偽 partial 的計算量（RTF 0.107 / 0.32）與授權。
+
+---
+
+## 2026-11-01　X-ASR 480 ms 改用 onnxruntime 1.31.1 直接推論（B11）
+
+環境同上；評測在 commit `eaf4ff1` + 未提交的程式上執行，程式即本次提交的內容。
+
+### 做了什麼
+
+- `ZipformerOrtAsr`（`src/asr/zipformer_ort.py`）：不經 sherpa-onnx，以專案依賴的 onnxruntime 1.31.1 用檔案路徑載入 encoder / decoder / joiner，照 sherpa-onnx 2.0.1 的串流 transducer 實作重寫：
+  - fbank：kaldi-native-fbank 串流 `OnlineFbank`，80 維、povey、dither 0、snip_edges=False、low_freq 20、high_freq −400，樣本維持 [−1, 1]。用 knf 預設的 high_freq 0（模型自帶 `test_onnx.py` 的設定）會讓 9 句測試中 2 句出現不同的字，所以照 sherpa-onnx 的 −400。
+  - encoder：每次 T = 61 個 frame、前進 48 個，「已處理 + 61 < 可用 frame」才送；116 個狀態張量（19 層 × 6 + embed_states、processed_lens）初始全零，以 `new_<名稱>` 輸出取代。
+  - greedy search：decoder 初始輸入 [−1, blank]；每個 encoder frame 一次 joiner，blank_penalty > 0 時減在 blank 的 logit 上，不是 blank / `<unk>` 就輸出並更新 decoder；token 時間 = 輸出 frame × 40 ms。
+  - 文字：token 開頭的「▁」視為空白，但前後都是中文時省略（「昨天是 MONDAY TODAY IS 礼拜二」）。sherpa-onnx 的 Python 結果就是這個格式，逐字比對才能相同。
+  - 句尾補零沿用 `TRANSDUCER_SPECS` 的 1.6 s。登記 `x-asr-480ms-int8-ort`；預設模型仍是 sherpa-onnx 版。
+
+### 驗證
+
+- **200 句冒煙集與 sherpa-onnx 版逐句相同**：200 / 200 條 hyp 相同；238 / 238 段的文字、VAD 起訖點、首字在音訊中的位置、partial 次數全部相同（只有牆鐘時間不同）。
+- 測試：X-ASR 自帶的 4 個中英混合音訊 + 2 個 WenetSpeech 音訊，blank_penalty 0 與 1.5 下文字與 token 時間都與 sherpa-onnx 相同；另跑既有的 chunk 大小無關、partial 串流、stream 互相獨立等測試。
+
+| 200 句冒煙集（500 ms，jobs 1） | CER | RTF | 首字 mean / P90 | 尾字 mean | 峰值 RSS（載入後） |
+|---|---|---|---|---|---|
+| X-ASR（sherpa-onnx，ORT 1.28.2） | 5.14% | 0.0282 | 1002 / 1031 | 535 | 535（—） |
+| **X-ASR（onnxruntime 1.31.1）** | 5.14% | 0.0291 | 1003 / 1034 | 537 | **348**（325） |
+
+- RTF 多約 3%、尾字多 2 ms：greedy search 改在 Python 逐 frame 呼叫 joiner（每個 480 ms chunk 12 次 joiner + 每個字 1 次 decoder），是 Python 與 ORT 呼叫開銷。延遲上可以忽略。
+
+### 記憶體（`scripts/probe_footprint.py`，MB）
+
+| 階段 | sherpa-onnx footprint（峰值） | onnxruntime 1.31.1 footprint（峰值） | RSS sherpa / ort | malloc 碎片 sherpa / ort |
+|---|---|---|---|---|
+| 載入後 | 274（**426**） | 274（**274**） | 476 / 303 | 185 / 28 |
+| 解碼 3 s 後 | 279（426） | 289（289） | 483 / 319 | 177 / 10 |
+| 解碼 30 s 後 | 280（426） | 290（290） | 484 / 320 | 178 / 10 |
+
+- **載入時的 footprint 峰值 426 → 274 MB、RSS 476 → 303 MB**：ORT 1.28 載入時的暫時配置與碎片消失。
+- 載入後的 footprint 兩邊相同（274），穩定狀態的 footprint 反而多約 10 MB（289 vs 279）：B11 估計的「約 261–270 MB」只算載入。RSS 差約 170 MB 而載入後 footprint 相同，推測 ORT 1.28 留下的碎片頁多已標記為可回收、不計入 footprint（未驗證），所以 footprint 的差別只出現在峰值。多出的 10 MB 原因未查（可能是 Python 端的 knf 特徵與 numpy 狀態複本）。
+- 與 SenseVoice（ORT 1.31.1）在同一個 ORT 版本下比較：X-ASR 載入後 274 / 推論後 289–290，SenseVoice 346 / 358–366（30 s 459）。
+
+### 結論
+
+X-ASR 不經 sherpa-onnx 推論，辨識結果不變，評測峰值 RSS 535 → 348 MB，iOS 更在意的 footprint 峰值 426 → 274 MB；代價是 RTF +3%。

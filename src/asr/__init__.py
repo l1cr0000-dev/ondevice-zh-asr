@@ -19,6 +19,7 @@ from src.asr.sherpa import (
     SherpaTransducerConfig,
     TransducerFiles,
 )
+from src.asr.zipformer_ort import OrtTransducerConfig, ZipformerOrtAsr
 from src.audio import SAMPLE_RATE
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "SAMPLE_RATE",
     "TRANSDUCER_SPECS",
     "AsrStream",
+    "OrtTransducerConfig",
     "SenseVoiceAsr",
     "SenseVoiceConfig",
     "SenseVoiceOrtAsr",
@@ -33,6 +35,7 @@ __all__ = [
     "SherpaTransducerConfig",
     "StreamingAsr",
     "TransducerFiles",
+    "ZipformerOrtAsr",
     "available_models",
     "load_asr",
 ]
@@ -61,6 +64,16 @@ def _transducer(name: str) -> Callable[[int, float], StreamingAsr]:
     )
 
 
+def _transducer_ort(name: str) -> Callable[[int, float], StreamingAsr]:
+    files, tail_padding_s = TRANSDUCER_SPECS[name]
+    return lambda threads, blank_penalty: ZipformerOrtAsr(
+        files,
+        OrtTransducerConfig(
+            num_threads=threads, tail_padding_s=tail_padding_s, blank_penalty=blank_penalty
+        ),
+    )
+
+
 def _sense_voice(
     partial_every_s: float | None, ort: bool = False
 ) -> Callable[[int, float], StreamingAsr]:
@@ -75,6 +88,8 @@ def _sense_voice(
 
 _REGISTRY: dict[str, Callable[[int, float], StreamingAsr]] = {
     **{name: _transducer(name) for name in TRANSDUCER_SPECS},
+    # 同一個 X-ASR 模型直接用 onnxruntime（專案依賴的版本）推論，結果與 sherpa-onnx 版逐句相同
+    "x-asr-480ms-int8-ort": _transducer_ort("x-asr-480ms-int8"),
     # 非串流：說話中沒有 partial，首字要等到 finalize（VAD 結束或暫定結果）
     "sensevoice-small-int8": _sense_voice(None),
     # 同上，但每累積 0.48 s 音訊就整段重新辨識一次當 partial（與 X-ASR 480 ms 的更新頻率相同）

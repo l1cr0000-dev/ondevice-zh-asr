@@ -106,3 +106,5 @@
 | SenseVoice，無偽 partial（onnxruntime 1.31.1） | 428 / 465 | 430 / 520 |
 
 physical footprint（`scripts/probe_footprint.py`，不含評測框架）：SenseVoice（ORT 1.31.1）載入後 346 MB、解碼 3 / 5 / 30 s 音訊後 358 / 366 / 459 MB；X-ASR（sherpa-onnx）載入後 271 MB（載入時峰值 427）、之後約 279 MB。
+
+**X-ASR 直接用 onnxruntime 1.31.1 推論**（`x-asr-480ms-int8-ort`；2026-11-01，`eaf4ff1`+）：200 句冒煙集（500 ms）與 sherpa-onnx 版逐句相同（hyp 200 / 200、各段 VAD 起訖與首字位置 238 / 238），CER 5.14%；RTF 0.0282 → 0.0291、首字 / 尾字差 ≤ 2 ms。峰值 RSS 535 → **348 MB**；physical footprint 載入後兩邊都是 274 MB，但載入時峰值 426 → **274 MB**，解碼後 279 → 289–290 MB。SenseVoice（ORT 1.31.1）同口徑為載入後 346、解碼 3–5 s 後 358–366 MB。

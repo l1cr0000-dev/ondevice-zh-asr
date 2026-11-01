@@ -15,7 +15,8 @@ import numpy.typing as npt
 import pytest
 
 from src.asr import SAMPLE_RATE, AsrStream, StreamingAsr, available_models, load_asr
-from src.asr.sherpa import ZIPFORMER_ZH_14M, SherpaTransducerAsr
+from src.asr.sherpa import X_ASR_480MS, ZIPFORMER_ZH_14M, SherpaTransducerAsr
+from src.asr.zipformer_ort import tokens_to_text
 from src.paths import MODELS_DIR
 from src.vad import load_wav
 
@@ -38,6 +39,8 @@ MAX_CER = {
     "zipformer-zh-14m": 0.15,
     # 兩句皆 0/N。上限 0.05 也用來抓句尾補零不足：1.wav 漏掉「表现」時 CER = 2/26 ≈ 0.077
     "x-asr-480ms-int8": 0.05,
+    # 同一模型直接用 onnxruntime，結果與上一行相同
+    "x-asr-480ms-int8-ort": 0.05,
     # 0.wav 1/28（漏「啊」）、1.wav 0/26。同樣用來抓句尾補零不足
     "x-asr-160ms-int8": 0.05,
 }
@@ -248,3 +251,39 @@ def test_sense_voice_ort_lfr_shape_and_edges() -> None:
     )
     assert feats.shape == (17, 560)
     assert asr.features(np.zeros(100, dtype=np.float32)).shape == (0, 560)  # 不足一個 frame
+
+
+# ---------- X-ASR 直接用 onnxruntime ----------
+
+# X-ASR 壓縮檔自帶的中英混合測試音訊（0–3.wav），用來比對英文單字與空白的處理
+X_ASR_TEST_WAVS = MODELS_DIR / X_ASR_480MS.model_dir / "test_wavs"
+
+
+def test_tokens_to_text_matches_sherpa_spacing() -> None:
+    # 中文之間不加空白，英文詞前後加空白，BPE 片段直接相接
+    tokens = ["▁昨", "▁天", "▁是", "▁MO", "N", "DA", "Y", "▁IS", "▁礼", "▁拜"]
+    assert tokens_to_text(tokens) == "昨天是 MONDAY IS 礼拜"
+    assert tokens_to_text([]) == ""
+
+
+def _transcribe_with_timestamps(asr: StreamingAsr, wav: Path) -> tuple[str, list[float] | None]:
+    stream = asr.create_stream()
+    for chunk in _chunks(load_wav(wav), 10):
+        stream.accept_waveform(chunk)
+    return stream.finalize(), stream.get_token_timestamps()
+
+
+@pytest.mark.parametrize("blank_penalty", [0.0, 1.5])
+def test_x_asr_ort_matches_sherpa(blank_penalty: float) -> None:
+    # 前處理、encoder 串流與 greedy search 照 sherpa-onnx 實作：文字與 token 時間要逐字相同
+    # （200 句冒煙集也逐句相同，見 docs/progress.md 2026-11-01）
+    if not X_ASR_TEST_WAVS.is_dir():
+        pytest.skip("X-ASR 未下載，請先執行 bash scripts/download_models.sh")
+    sherpa = load_asr("x-asr-480ms-int8", num_threads=1, blank_penalty=blank_penalty)
+    ort_asr = load_asr("x-asr-480ms-int8-ort", num_threads=1, blank_penalty=blank_penalty)
+    wavs = sorted(X_ASR_TEST_WAVS.glob("*.wav")) + [TEST_WAVS / w for w in sorted(REFERENCES)]
+    for wav in wavs:
+        expected = _transcribe_with_timestamps(sherpa, wav)
+        got = _transcribe_with_timestamps(ort_asr, wav)
+        assert got[0] == expected[0], wav
+        assert got[1] == pytest.approx(expected[1]), wav
