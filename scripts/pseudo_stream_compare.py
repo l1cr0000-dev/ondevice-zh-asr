@@ -14,6 +14,8 @@
   只在停頓時（暫定結果）才出字，要用這個口徑比較才公平。
 
 CER 差是同一批句子的成對 bootstrap（以句重抽 10000 次），以 `--baseline` 為 A。
+「重新辨識 次數 / 音訊比」是 SenseVoice 整段辨識的次數與辨識音訊總長 ÷ 送入音訊總長（含補靜音），
+與機器負載無關；RTF 與延遲含計算時間，同機有其他工作時會偏高。
 
 需要（預設 A2，jobs 1）：
     uv run scripts/prepare_short_subset.py
@@ -48,6 +50,7 @@ DEFAULT_MODELS = [
     "sensevoice-small-int8-ort-p960",
     "sensevoice-small-int8-ort-p480-960",
     "sensevoice-small-int8-ort-p480-max3",
+    "sensevoice-small-int8-ort-p480-960-max3",
 ]
 
 
@@ -199,7 +202,7 @@ def print_tables(report: dict[str, Any], baseline: str) -> None:
             else " 首字 e2e：partial mean / 可見 mean / 可見 P90 |"
         )
         head += " 說完 → 完整結果 mean / P90 |" if has_align else ""
-        head += " RTF | 峰值 RSS | 模型 MB |"
+        head += " RTF | 重新辨識 次數 / 音訊比 | 峰值 RSS | 模型 MB |"
         print(head)
         print("|" + "---|" * head.count(" |"))
         for model, r in rows.items():
@@ -211,7 +214,14 @@ def print_tables(report: dict[str, Any], baseline: str) -> None:
             )
             if has_align:
                 cells.append(_lat(r["result_latency_ms"]))
-            cells += [f"{r['rtf']:.3f}", _f(r.get("peak_rss_mb")), _f(r.get("model_mb"), ".1f")]
+            ac = r.get("asr_compute")
+            work = "—" if ac is None else f"{ac['num_decodes']} / {ac['decoded_audio_ratio']:.2f}"
+            cells += [
+                f"{r['rtf']:.3f}",
+                work,
+                _f(r.get("peak_rss_mb")),
+                _f(r.get("model_mb"), ".1f"),
+            ]
             print("| " + " | ".join(cells) + " |")
 
 
@@ -250,6 +260,7 @@ def main() -> int:
                 r = continuous(base, res)
             else:
                 r = single_sentence(base, res, align if dataset.startswith(ALIGN) else None)
+            r["asr_compute"] = res["metrics"].get("asr_compute")
             r["peak_rss_mb"] = res["metrics"]["memory_mb"]["peak_rss"]
             r["model_mb"] = res["metrics"]["model_size_mb"]
             r["commit"] = res["environment"].get("commit")

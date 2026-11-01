@@ -120,6 +120,10 @@ _REGISTRY: dict[str, Callable[[int, float], StreamingAsr]] = {
     "sensevoice-small-int8-ort-p480-960": _sense_voice(0.96, ort=True, first_s=0.48),
     # 每 0.48 s，但累積超過 3 s 就不再重新辨識（車艙指令多在 3 s 內；長句段只等暫定結果 / 定稿）
     "sensevoice-small-int8-ort-p480-max3": _sense_voice(0.48, ort=True, max_s=3.0),
+    # 兩者合併：首字同 p480，短句計算量同 p480-960，長句段的最壞情況有上限
+    "sensevoice-small-int8-ort-p480-960-max3": _sense_voice(
+        0.96, ort=True, first_s=0.48, max_s=3.0
+    ),
 }
 
 

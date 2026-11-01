@@ -164,6 +164,10 @@ VAD 起點首字延遲的細節：
 
 連續多句集另有 `segmentation.result_latency_ms_by_pause`：每句真實末字結束 → 第一個涵蓋整句的結果（暫定結果的 `audio_end_s` 不早於末字結束，或最終結果，取早者）。最終文字與同 min_silence 不開暫定結果時相同，CER 與斷句指標也相同。
 
+### 重新辨識的計算量（`asr_compute`，非串流後端才有）
+
+偽串流（SenseVoice 定期整段重新辨識）的計算量隨句長成長，RTF 又會受同機其他工作影響。後端實作 `StreamingAsr.compute_stats()` 時，`metrics.asr_compute` 記錄暖機之後的整段辨識次數 `num_decodes`、辨識的音訊總長 `decoded_audio_s`，以及 `decoded_audio_ratio = decoded_audio_s / Σ processed_s`（與 RTF 同分母）。這個比例與機器負載無關，用來比較偽串流各設定的計算量；X-ASR 等串流後端為 `null`。
+
 ### 峰值記憶體
 
 子程序結束前的 `resource.getrusage(RUSAGE_SELF).ru_maxrss`（macOS 單位是 bytes，Linux 是 KB，程式已分別換算），單位 MB。包含 Python 直譯器與 numpy / onnxruntime 本身；另記錄模型載入前與載入後的 RSS，兩者之差約等於模型佔用。

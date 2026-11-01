@@ -91,6 +91,25 @@ README 的評測表涵蓋 LibriSpeech、GigaSpeech、WenetSpeech（net / meeting
 
 FunASR Model Open Source License v1.1：可使用、複製、修改、分享（含微調與衍生模型），須標明來源與作者並保留模型名稱；對 Alibaba 或軟體的「無根據的詆毀或惡意攻擊」會自動失去授權；軟體「僅供參考與學習」、不負責損失；協議可修訂、公布即生效；準據法欄位是未填的範本（「[Country/Region]」）。**未明文提到商業用途**。本專案只用於評測對照，模型檔不進 git；若之後要預設採用或在 iOS app 內散布，需再確認這份授權。
 
+#### 商用限制查證（2026-11-01，偽串流比較時補查）
+
+逐項重讀第一手來源：
+
+| 來源 | 內容 |
+|---|---|
+| `MODEL_LICENSE`（FunASR main 分支，v1.1） | 全文**沒有出現「commercial / 商業」**，既不允許也不禁止。2.1 授權「use, copy, modify, and share」；2.2 須標明來源與作者、保留模型名稱；3 稱軟體「for reference and learning purposes only」、風險自負；4.2 詆毀 / 惡意攻擊即失去授權；5 違反任何條款自動終止；6 Alibaba 可單方修訂、公布即生效、繼續使用視為接受；7 準據法與版權年份（「[2023-2028]」）是未填的範本 |
+| Hugging Face `FunAudioLLM/SenseVoiceSmall` 模型卡 | metadata `license: other`、`license_name: model-license`（連到上面的 MODEL_LICENSE），內文沒有提商用 |
+| FunASR README「License」 | 工具程式碼 MIT；預訓練權重另依各模型卡，模型卡連到 MODEL_LICENSE 時適用該協議 |
+| SenseVoice GitHub issue #287（2026-05-11 提問、2026-05-20 關閉） | 有人問「權重是 MIT 還是 FunASR Model License、能否商用、需否標示」。維護者帳號 LauraGPT 回覆：SenseVoice 權重適用 FunASR Model License，「Commercial use is permitted」，建議在文件或 about 頁標示 FunASR / SenseVoice。https://github.com/FunAudioLLM/SenseVoice/issues/287 |
+
+**結論：**
+
+- 商用目前**可以做，但依據只是一則 issue 回覆**，不是授權文字本身。協議文字沒有商用條款，又寫「僅供參考與學習」，且 Alibaba 可單方修訂、立即生效，準據法未填。對比 X-ASR / zh-14M / Silero 的 Apache-2.0 / MIT，這是**明顯較弱的法律基礎**。
+- 實際條件：散布（例如打包進 iOS app）時要標明 FunASR / SenseVoice 來源與作者、保留模型名稱 SenseVoiceSmall；不可有 4.2 所述行為；要追蹤 MODEL_LICENSE 的修訂。
+- 正式商用前應取得書面確認（郵件或正式授權），並保存 issue #287 回覆與當時 MODEL_LICENSE 的快照。
+- 訓練資料未公開，資料授權如何延伸到權重同樣未知。
+- 對本專案的影響：偽串流（SenseVoice）只**保留為選項，預設維持 X-ASR**（Apache-2.0）。授權是不改預設的理由之一（另見 progress.md 2026-11-01「偽串流 vs 真串流」）。
+
 ## Silero VAD v6.2.3
 
 授權 MIT（https://github.com/snakers4/silero-vad ，tag `v6.2.3`）。VAD 不影響 CER 的領域判斷，訓練資料不在本次調查範圍。
