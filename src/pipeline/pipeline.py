@@ -42,6 +42,8 @@ def _default_vad() -> VadConfig:
     # 580 → 299 ms、CER 4.11 → 3.75 %；代價是約 35 % 的句子先出半句暫定結果、RTF 0.027 → 0.033。
     # 舊的單一門檻：VadConfig(min_silence_ms=500)（命令列 --min-silence-ms 500 --pause-ms 0）。
     # 其餘參數維持上游 Silero 預設值。VAD 模組本身的預設值不變。
+    # 2026-11-01 B9：pause 150（實際 160 ms）可讓 0.2 s 的句間停頓也出暫定結果（連續集 1314 → 232 ms），
+    # 代價是半句暫定結果的句子 36 → 40 %、解碼量 +3–8 %；是否改預設待決定（--pause-ms 150）。
     return VadConfig(min_silence_ms=1000, pause_ms=200)
 
 

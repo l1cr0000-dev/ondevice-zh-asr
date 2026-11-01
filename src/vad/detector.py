@@ -46,7 +46,9 @@ class VadConfig:
     min_speech_ms: int = 250
     min_silence_ms: int = 100
     speech_pad_ms: int = 30
-    pause_ms: int | None = None  # 停頓事件的靜音長度；None = 不發停頓事件
+    # 停頓事件的靜音長度；None = 不發停頓事件。靜音以 32 ms frame 計，實際門檻進位到 frame 的倍數：
+    # 200 → 224 ms、190 → 192 ms、150 → 160 ms、120 → 128 ms（B9：0.2 s 句間停頓有 39 % 的 VAD 靜音不滿 224 ms）
+    pause_ms: int | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 < self.threshold < 1.0:

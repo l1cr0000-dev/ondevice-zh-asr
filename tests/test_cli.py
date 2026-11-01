@@ -31,6 +31,12 @@ def test_single_threshold_fallback() -> None:
     assert config.vad.min_silence_ms == 500 and config.vad.pause_ms is None
 
 
+def test_neg_threshold() -> None:
+    assert pipeline_config_from_args(_parser().parse_args([])).vad.neg_threshold is None
+    args = _parser().parse_args(["--neg-threshold", "0.5"])
+    assert pipeline_config_from_args(args).vad.effective_neg_threshold == 0.5
+
+
 def test_sweep_args_are_lists() -> None:
     args = _parser(sweep=True).parse_args(["--min-silence-ms", "100", "500"])
     assert args.min_silence_ms == [100, 500]

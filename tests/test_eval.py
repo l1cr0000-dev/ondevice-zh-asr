@@ -155,6 +155,8 @@ def test_run_config_name_marks_non_default_options() -> None:
     assert RunConfig(**{**_cfg().__dict__, "blank_penalty": 2.0}).name.endswith("_lead1000_bp2")
     tail = RunConfig(**{**_cfg().__dict__, "tail_silence_ms": 1500, "blank_penalty": 2.0})
     assert tail.name.endswith("_lead1000_tail1500_bp2")
+    vad = RunConfig(**{**_cfg().__dict__, "vad_threshold": 0.6, "vad_neg_threshold": 0.5})
+    assert vad.name.endswith("_lead1000_th0.6_neg0.5")
 
 
 def test_summarize_run_latency_uses_first_segment_with_text() -> None:

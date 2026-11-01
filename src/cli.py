@@ -46,6 +46,12 @@ def add_pipeline_args(p: argparse.ArgumentParser, sweep: bool = False) -> None:
     )
     p.add_argument("--threshold", type=float, default=vad.threshold, help="VAD 語音閾值")
     p.add_argument(
+        "--neg-threshold",
+        type=float,
+        default=vad.neg_threshold,
+        help="VAD 判為靜音的機率閾值（遲滯）；不給時取 threshold - 0.15",
+    )
+    p.add_argument(
         "--min-speech-ms", type=non_negative_int, default=vad.min_speech_ms, help="VAD 最短語音"
     )
     p.add_argument(
@@ -78,6 +84,7 @@ def pipeline_config_from_args(args: argparse.Namespace) -> PipelineConfig:
     return PipelineConfig(
         vad=VadConfig(
             threshold=args.threshold,
+            neg_threshold=args.neg_threshold,
             min_speech_ms=args.min_speech_ms,
             min_silence_ms=args.min_silence_ms,
             speech_pad_ms=args.speech_pad_ms,

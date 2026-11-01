@@ -64,6 +64,7 @@ class RunConfig:
     # VAD 停頓事件的靜音長度：滿此值先輸出暫定結果，滿 min_silence 才定稿（0 = 不用暫定結果）
     pause_ms: int = 0
     provisional: str = "redecode"  # 暫定結果的做法：redecode / finalize（見 pipeline 模組說明）
+    vad_neg_threshold: float | None = None  # None = threshold - 0.15（VadConfig 預設）
 
     @property
     def name(self) -> str:
@@ -72,6 +73,8 @@ class RunConfig:
         lead += f"_pause{self.pause_ms}" if self.pause_ms else ""
         lead += "fin" if self.pause_ms and self.provisional == "finalize" else ""
         lead += f"_bp{self.blank_penalty:g}" if self.blank_penalty else ""
+        lead += f"_th{self.vad_threshold:g}" if self.vad_threshold != 0.5 else ""
+        lead += f"_neg{self.vad_neg_threshold:g}" if self.vad_neg_threshold is not None else ""
         return (
             f"{self.model}_sil{self.vad_min_silence_ms}_pre{self.pre_roll_ms}"
             f"_chunk{self.chunk_ms}_t{self.threads}{lead}"
@@ -110,6 +113,7 @@ def worker(cfg: RunConfig, shard: int = 0, num_shards: int = 1) -> dict[str, Any
     pipe_cfg = PipelineConfig(
         vad=VadConfig(
             threshold=cfg.vad_threshold,
+            neg_threshold=cfg.vad_neg_threshold,
             min_speech_ms=cfg.vad_min_speech_ms,
             min_silence_ms=cfg.vad_min_silence_ms,
             speech_pad_ms=cfg.vad_speech_pad_ms,
@@ -461,7 +465,8 @@ def print_detail(res: dict[str, Any]) -> None:
     e2e = m["e2e_first_token_latency_ms"]
     seg, ci = m["segments_per_utterance"], m["cer_ci95"]
     vad = (
-        f"threshold={c['vad_threshold']} min_speech={c['vad_min_speech_ms']}ms"
+        f"threshold={c['vad_threshold']} neg_threshold={c.get('vad_neg_threshold')}"
+        f" min_speech={c['vad_min_speech_ms']}ms"
         f" min_silence={c['vad_min_silence_ms']}ms pad={c['vad_speech_pad_ms']}ms"
     )
     dirty = " (dirty)" if env["dirty"] else ""
@@ -704,6 +709,7 @@ def main() -> int:
             chunk_ms=chunk,
             pre_roll_ms=pre,
             vad_threshold=args.threshold,
+            vad_neg_threshold=args.neg_threshold,
             vad_min_speech_ms=args.min_speech_ms,
             vad_min_silence_ms=sil,
             vad_speech_pad_ms=args.speech_pad_ms,
