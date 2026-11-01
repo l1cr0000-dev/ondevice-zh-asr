@@ -2,13 +2,14 @@
 
 用法：
     uv run scripts/prepare_eval_data.py      # 先準備資料（一次即可）：AISHELL-1 test 隨機 3000 句
-    uv run eval/run_eval.py                  # 預設模型與 pipeline 設定，3000 句正式評測集
+    uv run eval/run_eval.py                  # 預設模型與 pipeline 設定（兩段門檻 A2），3000 句正式評測集
+    uv run eval/run_eval.py --min-silence-ms 500 --pause-ms 0   # 舊的單一門檻 500 ms
     uv run eval/run_eval.py --smoke          # 快速冒煙：固定 seed 抽樣的 200 句子集
     uv run eval/run_eval.py --jobs 4         # 4 個子程序並行（RTF / 峰值 RSS 不是正式值）
-    uv run eval/run_eval.py --model zipformer-zh-14m --min-silence-ms 500 --pre-roll-ms 200
+    uv run eval/run_eval.py --model zipformer-zh-14m --pre-roll-ms 200
     # 參數掃描：多個值取笛卡兒積，每個組合各存一份結果，最後印出總表
     uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \\
-        --min-silence-ms 100 300 500 800 --pre-roll-ms 0 100 200 300 --tag sweep
+        --min-silence-ms 100 300 500 800 --pause-ms 0 --pre-roll-ms 0 100 200 300 --tag sweep
 
 每個組合在獨立子程序中執行（模型載入、推論、量峰值記憶體），父程序只負責 CER 與彙整，
 避免評測框架本身（jiwer、OpenCC）的記憶體算進去。結果存成 eval/results/<日期>_<設定名>.json，
@@ -577,6 +578,7 @@ def print_detail(res: dict[str, Any]) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     from src.cli import add_pipeline_args, non_negative_int, positive_int
+    from src.pipeline import PipelineConfig
 
     p = argparse.ArgumentParser(
         description="全鏈路評測（VAD + 串流 ASR）。多個值的參數取笛卡兒積做掃描。",
@@ -625,11 +627,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="並行的子程序數（每個仍是 --threads 執行緒）。設定數少於此值時把句子切成多份。"
         "> 1 時 CPU 互搶、可能排到效能核心以外，RTF 與峰值 RSS 不能當正式值；CER 不受影響",
     )
+    defaults = PipelineConfig()
     p.add_argument(
         "--pause-ms",
         type=non_negative_int,
         nargs="+",
-        default=[0],
+        default=[defaults.vad.pause_ms or 0],
         help="靜音滿此值先輸出暫定結果、滿 --min-silence-ms 才定稿（0 = 不用暫定結果；可給多個值掃描，"
         "不小於 min_silence 的組合略過；非 0 時結果名稱加 _pause<值>）",
     )
@@ -637,9 +640,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--provisional",
         nargs="+",
         choices=["redecode", "finalize"],
-        default=["redecode"],
+        default=[defaults.provisional],
         help="暫定結果的做法（--pause-ms 非 0 時）：redecode 停頓時重新解碼整句；finalize 停頓時 "
-        "finalize 原 stream、恢復說話時才重新解碼（結果名稱加 fin）。可給多個值掃描",
+        "finalize 原 stream、恢復說話時才重新解碼（結果名稱加 fin）。可給多個值掃描。"
+        "退回舊的單一門檻：--min-silence-ms 500 --pause-ms 0",
     )
     p.add_argument("--tag", default="", help="掃描總表檔名的標籤")
     p.add_argument("--results-dir", type=Path, default=RESULTS_DIR, help="結果輸出目錄")
@@ -677,6 +681,21 @@ def main() -> int:
         limited.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
         manifest = limited
 
+    # pause 0（不用暫定結果）時 provisional 沒有作用，統一記成 redecode 並去重
+    combos = dict.fromkeys(
+        (model, threads, chunk, sil, pre, bp, pause, mode if pause else "redecode")
+        for model, threads, chunk, sil, pre, bp, pause, mode in itertools.product(
+            args.model,
+            args.threads,
+            args.chunk_ms,
+            args.min_silence_ms,
+            args.pre_roll_ms,
+            args.blank_penalty,
+            args.pause_ms,
+            args.provisional,
+        )
+        if not pause or pause < sil
+    )
     configs = [
         RunConfig(
             model=model,
@@ -695,17 +714,7 @@ def main() -> int:
             pause_ms=pause,
             provisional=mode,
         )
-        for model, threads, chunk, sil, pre, bp, pause, mode in itertools.product(
-            args.model,
-            args.threads,
-            args.chunk_ms,
-            args.min_silence_ms,
-            args.pre_roll_ms,
-            args.blank_penalty,
-            args.pause_ms,
-            args.provisional,
-        )
-        if (not pause and mode == "redecode") or (pause and pause < sil)
+        for model, threads, chunk, sil, pre, bp, pause, mode in combos
     ]
     env = environment()
     args.results_dir.mkdir(parents=True, exist_ok=True)

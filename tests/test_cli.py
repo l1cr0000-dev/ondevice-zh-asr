@@ -25,6 +25,12 @@ def test_defaults_match_pipeline_config() -> None:
     assert args.threads == 1 and args.chunk_ms == 10
 
 
+def test_single_threshold_fallback() -> None:
+    args = _parser().parse_args(["--min-silence-ms", "500", "--pause-ms", "0"])
+    config = pipeline_config_from_args(args)
+    assert config.vad.min_silence_ms == 500 and config.vad.pause_ms is None
+
+
 def test_sweep_args_are_lists() -> None:
     args = _parser(sweep=True).parse_args(["--min-silence-ms", "100", "500"])
     assert args.min_silence_ms == [100, 500]

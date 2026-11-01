@@ -37,10 +37,12 @@ from src.vad import FrameClassifier, StreamingVad, VadConfig, VadEvent
 
 
 def _default_vad() -> VadConfig:
-    # AISHELL-1 test 200 句掃描（docs/progress.md）：min_silence_ms 100 → 500，X-ASR CER −1.8 個百分點、
-    # 每條平均切段數 1.74 → 1.19；500 → 800 無顯著差異，但每句最終結果要多等 300 ms。
+    # 兩段門檻（B9 方案 A2，配合 provisional="finalize"）：靜音 200 ms 先 finalize 出暫定結果，1000 ms 才定稿。
+    # AISHELL-1 test 3000 句（docs/progress.md 2026-11-01）：相對舊的單一門檻 500 ms，說完 → 完整結果
+    # 580 → 299 ms、CER 4.11 → 3.75 %；代價是約 35 % 的句子先出半句暫定結果、RTF 0.027 → 0.033。
+    # 舊的單一門檻：VadConfig(min_silence_ms=500)（命令列 --min-silence-ms 500 --pause-ms 0）。
     # 其餘參數維持上游 Silero 預設值。VAD 模組本身的預設值不變。
-    return VadConfig(min_silence_ms=500)
+    return VadConfig(min_silence_ms=1000, pause_ms=200)
 
 
 @dataclass(frozen=True)
@@ -51,7 +53,7 @@ class PipelineConfig:
     # 更長的 pre-roll 讓更多句子的首字要多等一個 480 ms chunk（P90 不穩），故取 100 ms。
     pre_roll_ms: int = 100
     # 暫定結果的做法（只在 vad.pause_ms 有設定時有作用），見模組說明
-    provisional: Literal["redecode", "finalize"] = "redecode"
+    provisional: Literal["redecode", "finalize"] = "finalize"
 
     def __post_init__(self) -> None:
         if self.pre_roll_ms < 0:
