@@ -159,3 +159,14 @@
 physical footprint（`scripts/probe_footprint.py`，不含評測框架）：SenseVoice（ORT 1.31.1）載入後 346 MB、解碼 3 / 5 / 30 s 音訊後 358 / 366 / 459 MB；X-ASR（sherpa-onnx）載入後 271 MB（載入時峰值 427）、之後約 279 MB。
 
 **X-ASR 直接用 onnxruntime 1.31.1 推論**（`x-asr-480ms-int8-ort`；2026-11-01，`eaf4ff1`+）：200 句冒煙集（500 ms）與 sherpa-onnx 版逐句相同（hyp 200 / 200、各段 VAD 起訖與首字位置 238 / 238），CER 5.14%；RTF 0.0282 → 0.0291、首字 / 尾字差 ≤ 2 ms。峰值 RSS 535 → **348 MB**；physical footprint 載入後兩邊都是 274 MB，但載入時峰值 426 → **274 MB**，解碼後 279 → 289–290 MB。SenseVoice（ORT 1.31.1）同口徑為載入後 346、解碼 3–5 s 後 358–366 MB。
+
+## SenseVoice 熱詞（只改解碼；2026-11-01，`2de7e6e`，分支 `feat/sv-hotword`）
+
+CTC prefix beam search + 熱詞加分（Aho-Corasick），熱詞 57 個目標（從 300 句對齊集挑的專有名詞）+ 50 個干擾。300 句對齊集全鏈路（A2）：
+
+| 設定 | CER % | 相對 greedy [95% CI] | 熱詞召回 | 熱詞句 / 非熱詞句 CER % | 非熱詞句改變 | 解碼 ms / 句 | 峰值 RSS (MB) |
+|---|---|---|---|---|---|---|---|
+| greedy（預設） | 2.56 | — | 67.2% | 6.24 / 1.78 | — | 0.7 | 441 |
+| **beam 8、score 2** | **2.16** | **−0.40 [−0.60, −0.21]** | **90.6%** | **3.98** / 1.78 | **0** | 6.3 | 446 |
+
+200 句冒煙集（同一份清單，192 句無關句子）：beam 8、score 1–4 都 0 句改變、0 誤觸發。目標熱詞取自評測句子本身，是樂觀設定；詳見 progress.md「SenseVoice 熱詞」。預設不變。
