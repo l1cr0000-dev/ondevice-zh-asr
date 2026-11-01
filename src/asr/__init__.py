@@ -90,6 +90,8 @@ _REGISTRY: dict[str, Callable[[int, float], StreamingAsr]] = {
     **{name: _transducer(name) for name in TRANSDUCER_SPECS},
     # 同一個 X-ASR 模型直接用 onnxruntime（專案依賴的版本）推論，結果與 sherpa-onnx 版逐句相同
     "x-asr-480ms-int8-ort": _transducer_ort("x-asr-480ms-int8"),
+    # 160 ms 版同樣做法；只在測試音訊上與 sherpa-onnx 版比對過，未跑冒煙集（docs/progress.md 2026-11-01）
+    "x-asr-160ms-int8-ort": _transducer_ort("x-asr-160ms-int8"),
     # 非串流：說話中沒有 partial，首字要等到 finalize（VAD 結束或暫定結果）
     "sensevoice-small-int8": _sense_voice(None),
     # 同上，但每累積 0.48 s 音訊就整段重新辨識一次當 partial（與 X-ASR 480 ms 的更新頻率相同）

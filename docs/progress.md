@@ -956,3 +956,7 @@ sherpa-onnx 2.0.1（PyPI 最新）內附 ORT 1.28.2，只升級 Python 套件無
 ### 結論
 
 X-ASR 不經 sherpa-onnx 推論，辨識結果不變，評測峰值 RSS 535 → 348 MB，iOS 更在意的 footprint 峰值 426 → 274 MB；代價是 RTF +3%。
+
+### 補記：160 ms 版
+
+`x-asr-160ms-int8-ort` 以同一個 `ZipformerOrtAsr` 登記（同為 zipformer2，T / chunk 由 metadata 讀取，句尾補零沿用 `TRANSDUCER_SPECS` 的 2.0 s）。pytest（132 passed）：6 個測試音訊在 blank_penalty 0 / 1.5 下文字與 token 時間都與 sherpa-onnx 版相同，通用測試（CER 上限、chunk 大小無關、partial 串流、stream 獨立）也通過。**尚未**跑冒煙集逐句比對，也沒量 footprint。

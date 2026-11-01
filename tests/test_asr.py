@@ -43,6 +43,8 @@ MAX_CER = {
     "x-asr-480ms-int8-ort": 0.05,
     # 0.wav 1/28（漏「啊」）、1.wav 0/26。同樣用來抓句尾補零不足
     "x-asr-160ms-int8": 0.05,
+    # 同一模型直接用 onnxruntime
+    "x-asr-160ms-int8-ort": 0.05,
 }
 
 
@@ -273,14 +275,16 @@ def _transcribe_with_timestamps(asr: StreamingAsr, wav: Path) -> tuple[str, list
     return stream.finalize(), stream.get_token_timestamps()
 
 
+@pytest.mark.parametrize("model", ["x-asr-480ms-int8", "x-asr-160ms-int8"])
 @pytest.mark.parametrize("blank_penalty", [0.0, 1.5])
-def test_x_asr_ort_matches_sherpa(blank_penalty: float) -> None:
+def test_x_asr_ort_matches_sherpa(model: str, blank_penalty: float) -> None:
     # 前處理、encoder 串流與 greedy search 照 sherpa-onnx 實作：文字與 token 時間要逐字相同
     # （200 句冒煙集也逐句相同，見 docs/progress.md 2026-11-01）
-    if not X_ASR_TEST_WAVS.is_dir():
-        pytest.skip("X-ASR 未下載，請先執行 bash scripts/download_models.sh")
-    sherpa = load_asr("x-asr-480ms-int8", num_threads=1, blank_penalty=blank_penalty)
-    ort_asr = load_asr("x-asr-480ms-int8-ort", num_threads=1, blank_penalty=blank_penalty)
+    try:
+        sherpa = load_asr(model, num_threads=1, blank_penalty=blank_penalty)
+    except FileNotFoundError:
+        pytest.skip(f"{model} 未下載，請先執行 bash scripts/download_models.sh")
+    ort_asr = load_asr(f"{model}-ort", num_threads=1, blank_penalty=blank_penalty)
     wavs = sorted(X_ASR_TEST_WAVS.glob("*.wav")) + [TEST_WAVS / w for w in sorted(REFERENCES)]
     for wav in wavs:
         expected = _transcribe_with_timestamps(sherpa, wav)
