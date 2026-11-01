@@ -10,6 +10,9 @@
     # 參數掃描：多個值取笛卡兒積，每個組合各存一份結果，最後印出總表
     uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \\
         --min-silence-ms 100 300 500 800 --pause-ms 0 --pre-roll-ms 0 100 200 300 --tag sweep
+    # SenseVoice 熱詞（只改解碼）：beam × 加分掃描
+    uv run eval/run_eval.py --manifest data/aishell1_align_300/manifest.jsonl \
+        --model sensevoice-small-int8-ort --hotwords hotwords.txt --beam 4 8 --hotword-score 1 2
 
 每個組合在獨立子程序中執行（模型載入、推論、量峰值記憶體），父程序只負責 CER 與彙整，
 避免評測框架本身（jiwer、OpenCC）的記憶體算進去。結果存成 eval/results/<日期>_<設定名>.json，
@@ -65,6 +68,10 @@ class RunConfig:
     pause_ms: int = 0
     provisional: str = "redecode"  # 暫定結果的做法：redecode / finalize（見 pipeline 模組說明）
     vad_neg_threshold: float | None = None  # None = threshold - 0.15（VadConfig 預設）
+    # SenseVoice（onnxruntime 版）解碼：beam 1 且沒有熱詞時是 greedy；hotwords 是熱詞檔路徑（"" = 不用）
+    beam: int = 1
+    hotwords: str = ""
+    hotword_score: float = 1.5
 
     @property
     def name(self) -> str:
@@ -75,6 +82,8 @@ class RunConfig:
         lead += f"_bp{self.blank_penalty:g}" if self.blank_penalty else ""
         lead += f"_th{self.vad_threshold:g}" if self.vad_threshold != 0.5 else ""
         lead += f"_neg{self.vad_neg_threshold:g}" if self.vad_neg_threshold is not None else ""
+        lead += f"_beam{self.beam}" if self.beam != 1 else ""
+        lead += f"_hw-{Path(self.hotwords).stem}{self.hotword_score:g}" if self.hotwords else ""
         return (
             f"{self.model}_sil{self.vad_min_silence_ms}_pre{self.pre_roll_ms}"
             f"_chunk{self.chunk_ms}_t{self.threads}{lead}"
@@ -102,7 +111,8 @@ def worker(cfg: RunConfig, shard: int = 0, num_shards: int = 1) -> dict[str, Any
     """跑 manifest 中第 `shard` 份（共 `num_shards` 份，連續切分）的句子。"""
     import numpy as np
 
-    from src.asr import SAMPLE_RATE, load_asr
+    from src.asr import SAMPLE_RATE, DecodeOptions, load_asr
+    from src.cli import read_hotwords
     from src.pipeline import PipelineConfig, transcribe
     from src.vad import SileroVadModel, VadConfig, load_wav
 
@@ -125,7 +135,13 @@ def worker(cfg: RunConfig, shard: int = 0, num_shards: int = 1) -> dict[str, Any
 
     t0 = time.perf_counter()
     vad_model = SileroVadModel(num_threads=cfg.threads)
-    asr = load_asr(cfg.model, num_threads=cfg.threads, blank_penalty=cfg.blank_penalty)
+    decode = DecodeOptions(
+        blank_penalty=cfg.blank_penalty,
+        beam=cfg.beam,
+        hotwords=read_hotwords(Path(cfg.hotwords) if cfg.hotwords else None),
+        hotword_score=cfg.hotword_score,
+    )
+    asr = load_asr(cfg.model, num_threads=cfg.threads, decode=decode)
     load_s = time.perf_counter() - t0
     rss_loaded = _rss_mb()
     files = [vad_model.model_path, *asr.model_files()]
@@ -447,6 +463,8 @@ def table_row(res: dict[str, Any]) -> str:
     e2e = m.get("e2e_first_token_latency_ms") or {"mean": None, "p90": None}
     bp = c.get("blank_penalty") or 0
     model = f"{c['model']} bp={bp:g}" if bp else c["model"]
+    model += f" beam={c['beam']}" if c.get("beam", 1) != 1 else ""
+    model += f" hw={c['hotword_score']:g}" if c.get("hotwords") else ""
     return (
         f"| {model} | {c['vad_min_silence_ms']} | {c['pre_roll_ms']} "
         f"| {m['cer'] * 100:.2f} | {_ci(m['cer_ci95']['utterance'])} | {m['rtf']:.4f} "
@@ -582,7 +600,7 @@ def print_detail(res: dict[str, Any]) -> None:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    from src.cli import add_pipeline_args, non_negative_int, positive_int
+    from src.cli import add_decode_args, add_pipeline_args, non_negative_int, positive_int
     from src.pipeline import PipelineConfig
 
     p = argparse.ArgumentParser(
@@ -599,6 +617,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"改用 200 句子集快速冒煙（{SMOKE_MANIFEST.relative_to(REPO_ROOT)}）",
     )
     add_pipeline_args(p, sweep=True)
+    add_decode_args(p, sweep=True)
     p.add_argument(
         "--warmup", type=non_negative_int, default=3, help="正式計時前先跑幾句暖機（不計入）"
     )
@@ -687,9 +706,24 @@ def main() -> int:
         manifest = limited
 
     # pause 0（不用暫定結果）時 provisional 沒有作用，統一記成 redecode 並去重
+    # 沒有熱詞時 hotword_score 沒有作用，統一記成預設值並去重
+    from src.asr import DecodeOptions
+
+    default_score = DecodeOptions().hotword_score
     combos = dict.fromkeys(
-        (model, threads, chunk, sil, pre, bp, pause, mode if pause else "redecode")
-        for model, threads, chunk, sil, pre, bp, pause, mode in itertools.product(
+        (
+            model,
+            threads,
+            chunk,
+            sil,
+            pre,
+            bp,
+            pause,
+            mode if pause else "redecode",
+            beam,
+            score if args.hotwords else default_score,
+        )
+        for model, threads, chunk, sil, pre, bp, pause, mode, beam, score in itertools.product(
             args.model,
             args.threads,
             args.chunk_ms,
@@ -698,6 +732,8 @@ def main() -> int:
             args.blank_penalty,
             args.pause_ms,
             args.provisional,
+            args.beam,
+            args.hotword_score,
         )
         if not pause or pause < sil
     )
@@ -719,8 +755,11 @@ def main() -> int:
             blank_penalty=bp,
             pause_ms=pause,
             provisional=mode,
+            beam=beam,
+            hotwords=str(args.hotwords.resolve()) if args.hotwords else "",
+            hotword_score=score,
         )
-        for model, threads, chunk, sil, pre, bp, pause, mode in combos
+        for model, threads, chunk, sil, pre, bp, pause, mode, beam, score in combos
     ]
     env = environment()
     args.results_dir.mkdir(parents=True, exist_ok=True)

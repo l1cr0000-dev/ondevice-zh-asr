@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from src.cli import add_pipeline_args, display_width, pipeline_config_from_args
+from src.cli import (
+    add_decode_args,
+    add_pipeline_args,
+    display_width,
+    pipeline_config_from_args,
+    read_hotwords,
+)
 from src.pipeline import PipelineConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -84,3 +90,16 @@ def test_run_eval_empty_manifest(tmp_path: Path) -> None:
     assert "是空的" in proc.stderr
     assert "Traceback" not in proc.stderr
     assert not list(tmp_path.glob("*.json"))
+
+
+def test_decode_args_and_hotword_file(tmp_path: Path) -> None:
+    p = argparse.ArgumentParser()
+    add_decode_args(p, sweep=True)
+    args = p.parse_args([])
+    assert args.hotwords is None and args.beam == [1] and args.hotword_score == [1.5]
+    args = p.parse_args(["--beam", "4", "8", "--hotword-score", "1", "2"])
+    assert args.beam == [4, 8] and args.hotword_score == [1.0, 2.0]
+    f = tmp_path / "hw.txt"
+    f.write_text("# 註解\n北京\n\n  上海  # 行尾註解\n北京\n", encoding="utf-8")
+    assert read_hotwords(f) == ("北京", "上海")
+    assert read_hotwords(None) == ()

@@ -97,6 +97,36 @@ def bootstrap_cer_ci(
     return float(lo), float(hi)
 
 
+def paired_bootstrap_cer_diff(
+    errors_a: Sequence[int],
+    errors_b: Sequence[int],
+    ref_tokens: Sequence[int],
+    n_resamples: int = 10000,
+    level: float = 0.95,
+    seed: int = 0,
+) -> tuple[float, float, float]:
+    """同一批句子上兩個設定的語料級 CER 差（B − A）與成對百分位 bootstrap 信賴區間。
+
+    每次以句為單位重抽，A 與 B 用同一組索引，消除句子難易度的共同變異。回傳 (差, 下界, 上界)。
+    """
+    ea = np.asarray(errors_a, dtype=np.int64)
+    eb = np.asarray(errors_b, dtype=np.int64)
+    ref = np.asarray(ref_tokens, dtype=np.int64)
+    if not len(ea) == len(eb) == len(ref):
+        raise ValueError("兩個設定的句數不同")
+    diff = eb - ea
+    rng = np.random.default_rng(seed)
+    out = np.empty(n_resamples)
+    batch = max(1, 2_000_000 // len(ref))
+    for start in range(0, n_resamples, batch):
+        stop = min(start + batch, n_resamples)
+        idx = rng.integers(0, len(ref), size=(stop - start, len(ref)))
+        out[start:stop] = diff[idx].sum(axis=1) / ref[idx].sum(axis=1)
+    alpha = (1 - level) / 2
+    lo, hi = np.quantile(out, [alpha, 1 - alpha])
+    return float(diff.sum() / ref.sum()), float(lo), float(hi)
+
+
 def summarize(values: Sequence[float]) -> dict[str, float | int | None]:
     """平均與 P50 / P90 / P99（numpy 線性內插）。空序列回傳 None。"""
     if not values:

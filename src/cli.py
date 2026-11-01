@@ -2,6 +2,7 @@
 
 import argparse
 import unicodedata
+from pathlib import Path
 from typing import Any
 
 from src.asr import DEFAULT_MODEL, available_models
@@ -77,6 +78,44 @@ def add_pipeline_args(p: argparse.ArgumentParser, sweep: bool = False) -> None:
             default=defaults.provisional,
             help="暫定結果的做法：redecode 停頓時重新解碼整句；finalize 停頓時 finalize、恢復說話時才重新解碼",
         )
+
+
+def add_decode_args(p: argparse.ArgumentParser, sweep: bool = False) -> None:
+    """SenseVoice（onnxruntime 版）的 beam search / 熱詞參數。`sweep=True` 時 --beam / --hotword-score 可給多個值。"""
+    from src.asr import DecodeOptions
+
+    defaults = DecodeOptions()
+
+    def multi(default: object) -> dict[str, Any]:
+        return {"nargs": "+", "default": [default]} if sweep else {"default": default}
+
+    p.add_argument(
+        "--hotwords",
+        type=Path,
+        help="熱詞檔（UTF-8，一行一個詞，# 開頭為註解）；只支援 sensevoice-small-int8-ort*",
+    )
+    p.add_argument(
+        "--hotword-score",
+        type=float,
+        help="熱詞每拼對一個 token 的加分（有 --hotwords 時才有作用）",
+        **multi(defaults.hotword_score),
+    )
+    p.add_argument(
+        "--beam",
+        type=positive_int,
+        help="CTC prefix beam search 的 beam 寬度；1 且沒有熱詞時用 greedy",
+        **multi(defaults.beam),
+    )
+
+
+def read_hotwords(path: Path | None) -> tuple[str, ...]:
+    """熱詞檔 → 去重後的詞（保留順序）；None → 空。"""
+    if path is None:
+        return ()
+    words = (
+        line.split("#", 1)[0].strip() for line in path.read_text(encoding="utf-8").splitlines()
+    )
+    return tuple(dict.fromkeys(w for w in words if w))
 
 
 def pipeline_config_from_args(args: argparse.Namespace) -> PipelineConfig:
