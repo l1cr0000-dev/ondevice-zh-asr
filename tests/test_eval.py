@@ -8,7 +8,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from eval.metrics import bootstrap_cer_ci, corpus_cer, summarize, utterance_counts
+from eval.metrics import (
+    bootstrap_cer_ci,
+    corpus_cer,
+    paired_bootstrap_cer_diff,
+    summarize,
+    utterance_counts,
+)
 from eval.run_eval import RunConfig, cer_confidence, summarize_run
 from eval.text_norm import normalize, tokenize
 from src.vad import DEFAULT_MODEL_PATH
@@ -157,6 +163,8 @@ def test_run_config_name_marks_non_default_options() -> None:
     assert tail.name.endswith("_lead1000_tail1500_bp2")
     vad = RunConfig(**{**_cfg().__dict__, "vad_threshold": 0.6, "vad_neg_threshold": 0.5})
     assert vad.name.endswith("_lead1000_th0.6_neg0.5")
+    hw = RunConfig(**{**_cfg().__dict__, "beam": 4, "hotwords": "/x/cabin.txt", "hotword_score": 2.0})
+    assert hw.name.endswith("_lead1000_beam4_hw-cabin2")
 
 
 def test_summarize_run_latency_uses_first_segment_with_text() -> None:
@@ -230,3 +238,16 @@ def test_run_eval_end_to_end(tmp_path: Path) -> None:
     assert m["memory_mb"]["peak_rss"] > m["memory_mb"]["baseline_rss"] > 0
     assert m["model_size_mb"] > 1
     assert set(res["config"]) >= {"model", "pre_roll_ms", "chunk_ms", "vad_min_silence_ms"}
+
+
+def test_paired_bootstrap_cer_diff() -> None:
+    refs = [10] * 50
+    a = [1] * 50
+    diff, lo, hi = paired_bootstrap_cer_diff(a, a, refs, n_resamples=500)
+    assert diff == lo == hi == 0.0  # 逐句相同 → 差為 0，區間退化
+    b = [2] * 25 + [1] * 25  # B 在一半的句子多錯 1 字
+    diff, lo, hi = paired_bootstrap_cer_diff(a, b, refs, n_resamples=2000)
+    assert diff == pytest.approx(25 / 500)
+    assert 0 < lo < diff < hi
+    with pytest.raises(ValueError):
+        paired_bootstrap_cer_diff(a, b[:-1], refs)

@@ -24,8 +24,8 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.asr import SAMPLE_RATE, load_asr
-from src.cli import add_pipeline_args, pipeline_config_from_args
+from src.asr import SAMPLE_RATE, DecodeOptions, load_asr
+from src.cli import add_decode_args, add_pipeline_args, pipeline_config_from_args, read_hotwords
 from src.pipeline import Utterance, transcribe
 from src.vad import VAD_MODEL_NAME, SileroVadModel, load_wav
 
@@ -40,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("wav", nargs="?", type=Path, default=DEFAULT_WAV, help="16 kHz wav 檔")
     p.add_argument("-o", "--output", type=Path, help="輸出 JSON 路徑；不給則印到 stdout")
     add_pipeline_args(p)
+    add_decode_args(p)
     p.add_argument("--partials", action="store_true", help="輸出每句的 partial 變化歷程")
     return p.parse_args()
 
@@ -82,7 +83,10 @@ def main() -> int:
         config = pipeline_config_from_args(args)
         audio = load_wav(args.wav)
         vad_model = SileroVadModel(num_threads=args.threads)
-        asr = load_asr(args.model, num_threads=args.threads)
+        decode = DecodeOptions(
+            beam=args.beam, hotwords=read_hotwords(args.hotwords), hotword_score=args.hotword_score
+        )
+        asr = load_asr(args.model, num_threads=args.threads, decode=decode)
     except (ValueError, FileNotFoundError) as e:
         print(f"錯誤：{e}", file=sys.stderr)
         return 1

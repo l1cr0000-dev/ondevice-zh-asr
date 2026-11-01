@@ -4,10 +4,12 @@
 `accept_waveform(chunk)` / `get_partial_result()` / `finalize()`。
 
 以名稱載入已登記的模型：`load_asr("x-asr-480ms-int8", num_threads=1)`（不給名稱時用 `DEFAULT_MODEL`）。
+解碼參數（blank penalty、beam、熱詞）以 `DecodeOptions` 傳入；不適用於該模型的參數會報錯。
 新增後端時：實作 `StreamingAsr` / `AsrStream`，再到 `_REGISTRY` 登記一個名稱。
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from src.asr.base import AsrStream, StreamingAsr
 from src.asr.sense_voice import SenseVoiceAsr, SenseVoiceConfig, SenseVoiceOrtAsr
@@ -27,6 +29,7 @@ __all__ = [
     "SAMPLE_RATE",
     "TRANSDUCER_SPECS",
     "AsrStream",
+    "DecodeOptions",
     "OrtTransducerConfig",
     "SenseVoiceAsr",
     "SenseVoiceConfig",
@@ -54,39 +57,73 @@ TRANSDUCER_SPECS: dict[str, tuple[TransducerFiles, float]] = {
 }
 
 
-def _transducer(name: str) -> Callable[[int, float], StreamingAsr]:
+@dataclass(frozen=True)
+class DecodeOptions:
+    """模型共用的解碼參數。預設值 = 各模型原本的解碼方式。"""
+
+    blank_penalty: float = 0.0  # 只適用於 transducer
+    beam: int = 1  # 只適用於 SenseVoice onnxruntime 版；1 = greedy
+    hotwords: tuple[str, ...] = ()  # 同上
+    hotword_score: float = 1.5
+
+
+_Factory = Callable[[int, DecodeOptions], StreamingAsr]
+
+
+def _no_ctc_options(opts: DecodeOptions) -> None:
+    if opts.beam != 1 or opts.hotwords:
+        raise ValueError("beam / 熱詞目前只支援 sensevoice-small-int8-ort*")
+
+
+def _transducer(name: str) -> _Factory:
     files, tail_padding_s = TRANSDUCER_SPECS[name]
-    return lambda threads, blank_penalty: SherpaTransducerAsr(
-        files,
-        SherpaTransducerConfig(
-            num_threads=threads, tail_padding_s=tail_padding_s, blank_penalty=blank_penalty
-        ),
-    )
+
+    def factory(threads: int, opts: DecodeOptions) -> StreamingAsr:
+        _no_ctc_options(opts)
+        return SherpaTransducerAsr(
+            files,
+            SherpaTransducerConfig(
+                num_threads=threads, tail_padding_s=tail_padding_s, blank_penalty=opts.blank_penalty
+            ),
+        )
+
+    return factory
 
 
-def _transducer_ort(name: str) -> Callable[[int, float], StreamingAsr]:
+def _transducer_ort(name: str) -> _Factory:
     files, tail_padding_s = TRANSDUCER_SPECS[name]
-    return lambda threads, blank_penalty: ZipformerOrtAsr(
-        files,
-        OrtTransducerConfig(
-            num_threads=threads, tail_padding_s=tail_padding_s, blank_penalty=blank_penalty
-        ),
-    )
+
+    def factory(threads: int, opts: DecodeOptions) -> StreamingAsr:
+        _no_ctc_options(opts)
+        return ZipformerOrtAsr(
+            files,
+            OrtTransducerConfig(
+                num_threads=threads, tail_padding_s=tail_padding_s, blank_penalty=opts.blank_penalty
+            ),
+        )
+
+    return factory
 
 
-def _sense_voice(
-    partial_every_s: float | None, ort: bool = False
-) -> Callable[[int, float], StreamingAsr]:
-    def factory(threads: int, blank_penalty: float) -> StreamingAsr:
-        if blank_penalty:
+def _sense_voice(partial_every_s: float | None, ort: bool = False) -> _Factory:
+    def factory(threads: int, opts: DecodeOptions) -> StreamingAsr:
+        if opts.blank_penalty:
             raise ValueError("blank_penalty 只適用於 transducer 模型")
-        config = SenseVoiceConfig(num_threads=threads, partial_every_s=partial_every_s)
+        if not ort:
+            _no_ctc_options(opts)
+        config = SenseVoiceConfig(
+            num_threads=threads,
+            partial_every_s=partial_every_s,
+            beam=opts.beam,
+            hotwords=opts.hotwords,
+            hotword_score=opts.hotword_score,
+        )
         return SenseVoiceOrtAsr(config) if ort else SenseVoiceAsr(config)
 
     return factory
 
 
-_REGISTRY: dict[str, Callable[[int, float], StreamingAsr]] = {
+_REGISTRY: dict[str, _Factory] = {
     **{name: _transducer(name) for name in TRANSDUCER_SPECS},
     # 同一個 X-ASR 模型直接用 onnxruntime（專案依賴的版本）推論，結果與 sherpa-onnx 版逐句相同
     "x-asr-480ms-int8-ort": _transducer_ort("x-asr-480ms-int8"),
@@ -107,10 +144,14 @@ def available_models() -> list[str]:
 
 
 def load_asr(
-    name: str = DEFAULT_MODEL, num_threads: int = 1, blank_penalty: float = 0.0
+    name: str = DEFAULT_MODEL,
+    num_threads: int = 1,
+    blank_penalty: float = 0.0,
+    decode: DecodeOptions | None = None,
 ) -> StreamingAsr:
+    """`blank_penalty` 是 `DecodeOptions.blank_penalty` 的簡寫（給了 `decode` 時以 `decode` 為準）。"""
     try:
         factory = _REGISTRY[name]
     except KeyError:
         raise ValueError(f"未知模型 {name!r}，可用：{', '.join(available_models())}") from None
-    return factory(num_threads, blank_penalty)
+    return factory(num_threads, decode or DecodeOptions(blank_penalty=blank_penalty))

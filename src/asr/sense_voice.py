@@ -11,7 +11,7 @@ onnxruntime 版存在的原因：sherpa-onnx 2.0.1 內附 ORT 1.28.2，載入 Se
   None = 不產生 partial（首字要等到 finalize）。
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,12 @@ import numpy.typing as npt
 import sherpa_onnx  # type: ignore[import-untyped]
 
 from src.asr.base import AsrStream, StreamingAsr
+from src.asr.ctc_decode import (
+    HotwordGraph,
+    ctc_greedy,
+    ctc_prefix_beam_search,
+    tokenize_hotword,
+)
 from src.audio import SAMPLE_RATE
 from src.paths import MODELS_DIR
 
@@ -35,6 +41,11 @@ class SenseVoiceConfig:
     # 反正規化（數字轉阿拉伯數字、加標點）。AISHELL 標註是中文數字，評測的正規化不做 ITN，故關閉
     use_itn: bool = False
     partial_every_s: float | None = None
+    # 解碼（只有 onnxruntime 版支援）：beam = 1 且沒有熱詞時走 CTC greedy（與原本逐句相同）；
+    # 否則用 CTC prefix beam search，熱詞每拼對一個 token 加 hotword_score（見 src.asr.ctc_decode）
+    beam: int = 1
+    hotwords: tuple[str, ...] = ()
+    hotword_score: float = 1.5
 
 
 class SenseVoiceStream(AsrStream):
@@ -75,6 +86,10 @@ class SenseVoiceStream(AsrStream):
 class SenseVoiceAsr(StreamingAsr):
     def __init__(self, config: SenseVoiceConfig | None = None, models_dir: Path = MODELS_DIR):
         self.config = config or SenseVoiceConfig()
+        if self.config.beam != 1 or self.config.hotwords:
+            raise ValueError(
+                "beam search / 熱詞只支援 onnxruntime 版（sensevoice-small-int8-ort*）"
+            )
         root = models_dir / SENSE_VOICE_DIR
         self._paths = {"model": root / "model.int8.onnx", "tokens": root / "tokens.txt"}
         missing = [str(p) for p in self._paths.values() if not p.is_file()]
@@ -116,6 +131,48 @@ class SenseVoiceAsr(StreamingAsr):
         return SenseVoiceStream(self._recognize_audio, self.config.partial_every_s)
 
 
+class SenseVoiceDecoder:
+    """SenseVoice 模型輸出 (T, vocab) → 文字。beam ≤ 1 且沒有熱詞時是 CTC greedy，否則 prefix beam search。
+
+    兩者都略過前 4 個位置（語言、情緒、事件、ITN）：greedy 丟掉前 4 個 token（與 sherpa-onnx 相同），
+    beam search 直接略過前 4 個 frame（實測這 4 個 frame 的 argmax 一律是這 4 個特殊 token）。
+    """
+
+    def __init__(
+        self,
+        tokens: dict[int, str],
+        beam: int = 1,
+        hotwords: Sequence[str] = (),
+        hotword_score: float = 1.5,
+    ) -> None:
+        self._tokens = tokens
+        self.beam = max(beam, 1)
+        self.hotword_score = hotword_score
+        vocab = {sym: idx for idx, sym in tokens.items()}
+        encoded = {w: tokenize_hotword(w, vocab) for w in hotwords}
+        self.skipped_hotwords = [w for w, ids in encoded.items() if ids is None]
+        self.graph = (
+            HotwordGraph([ids for ids in encoded.values() if ids], hotword_score)
+            if hotwords
+            else None
+        )
+        self.greedy = self.beam == 1 and self.graph is None
+
+    def decode(self, logits: npt.NDArray[np.float32]) -> str:
+        if self.greedy:
+            ids = ctc_greedy(logits)[4:]
+        else:
+            ids = ctc_prefix_beam_search(logits[4:], self.beam, self.graph)
+        return "".join(self._tokens[t] for t in ids).replace("▁", " ").strip()
+
+    def describe(self) -> str:
+        """寫進模型名稱的解碼設定（greedy 時為空字串，維持原本的名稱）。"""
+        out = "" if self.greedy else f" beam={self.beam}"
+        if self.graph is not None:
+            out += f" hotwords={self.graph.num_words} hotword_score={self.hotword_score:g}"
+        return out
+
+
 class SenseVoiceOrtAsr(StreamingAsr):
     """直接用 onnxruntime 跑 SenseVoice，前處理與解碼照 sherpa-onnx 2.0.1 的實作：
 
@@ -127,6 +184,9 @@ class SenseVoiceOrtAsr(StreamingAsr):
     - 模型輸入另有 language（metadata `lang_<語言>`）與 text_norm（with_itn / without_itn）。
     - CTC greedy：逐 frame argmax、合併重複、去掉 blank（id 0），再丟掉前 4 個 token
       （語言、情緒、事件、ITN 標記）。token 中的「▁」換成空白。
+    - 選用 beam search / 熱詞（`SenseVoiceConfig.beam` / `hotwords`）：前 4 個 frame 對應上述 4 個
+      查詢位置（實測 argmax 一律是 4 個特殊 token），直接略過，只對第 5 個 frame 起做
+      prefix beam search。熱詞對不上 tokens.txt 的會略過並列在 `decoder.skipped_hotwords`。
     """
 
     def __init__(self, config: SenseVoiceConfig | None = None, models_dir: Path = MODELS_DIR):
@@ -162,6 +222,9 @@ class SenseVoiceOrtAsr(StreamingAsr):
         for line in self._paths["tokens"].read_text(encoding="utf-8").splitlines():
             sym, idx = line.rsplit(" ", 1)
             self._tokens[int(idx)] = sym
+        self.decoder = self.make_decoder(
+            self.config.beam, self.config.hotwords, self.config.hotword_score
+        )
         fbank = knf.FbankOptions()
         fbank.frame_opts.samp_freq = SAMPLE_RATE
         fbank.frame_opts.dither = 0.0
@@ -188,10 +251,11 @@ class SenseVoiceOrtAsr(StreamingAsr):
         out: npt.NDArray[np.float32] = ((lfr + self._neg_mean) * self._inv_std).astype(np.float32)
         return out
 
-    def _recognize_audio(self, audio: npt.NDArray[np.float32]) -> str:
+    def logits(self, audio: npt.NDArray[np.float32]) -> npt.NDArray[np.float32] | None:
+        """整段音訊 → 模型輸出 (T, vocab)（未經 softmax）；音訊太短沒有 frame 時回傳 None。"""
         x = self.features(audio)
         if not len(x):
-            return ""
+            return None
         (logits,) = self._session.run(
             ["logits"],
             {
@@ -201,14 +265,21 @@ class SenseVoiceOrtAsr(StreamingAsr):
                 "text_norm": self._text_norm,
             },
         )
-        ids = logits[0].argmax(axis=-1)
-        tokens: list[int] = []
-        prev = -1
-        for y in ids.tolist():
-            if y != 0 and y != prev:
-                tokens.append(y)
-            prev = y
-        return "".join(self._tokens[t] for t in tokens[4:]).replace("▁", " ").strip()
+        out: npt.NDArray[np.float32] = logits[0]
+        return out
+
+    def make_decoder(
+        self, beam: int = 1, hotwords: Sequence[str] = (), hotword_score: float = 1.5
+    ) -> "SenseVoiceDecoder":
+        """同一個模型的另一組解碼設定（評測掃描時共用同一份 logits 用）。"""
+        return SenseVoiceDecoder(self._tokens, beam, hotwords, hotword_score)
+
+    def decode(self, logits: npt.NDArray[np.float32]) -> str:
+        return self.decoder.decode(logits)
+
+    def _recognize_audio(self, audio: npt.NDArray[np.float32]) -> str:
+        logits = self.logits(audio)
+        return "" if logits is None else self.decoder.decode(logits)
 
     @property
     def name(self) -> str:
@@ -217,6 +288,7 @@ class SenseVoiceOrtAsr(StreamingAsr):
             f"onnxruntime/{SENSE_VOICE_DIR}/model.int8.onnx threads={self.config.num_threads}"
             f" language={self.config.language} itn={self.config.use_itn}"
             + (f" partial_every={every:g}s" if every else "")
+            + self.decoder.describe()
         )
 
     def model_files(self) -> list[Path]:
