@@ -31,15 +31,23 @@ class SileroVadModel:
 
     frame_size = FRAME_SIZE
 
-    def __init__(self, model_path: str | Path = DEFAULT_MODEL_PATH, num_threads: int = 1) -> None:
+    def __init__(
+        self,
+        model_path: str | Path = DEFAULT_MODEL_PATH,
+        num_threads: int = 1,
+        sess_options: Any = None,
+    ) -> None:
+        """`sess_options`：自訂的 `ort.SessionOptions`（量測用）；給定時 `num_threads` 不使用。"""
         model_path = self.model_path = Path(model_path)
         if not model_path.is_file():
             raise FileNotFoundError(
                 f"找不到 VAD 模型：{model_path}。請先執行 bash scripts/download_models.sh"
             )
-        opts: Any = ort.SessionOptions()
-        opts.intra_op_num_threads = num_threads
-        opts.inter_op_num_threads = 1
+        opts: Any = sess_options
+        if opts is None:
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = num_threads
+            opts.inter_op_num_threads = 1
         self._session: Any = ort.InferenceSession(
             str(model_path), sess_options=opts, providers=["CPUExecutionProvider"]
         )

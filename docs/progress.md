@@ -1079,3 +1079,94 @@ A2 下 0.2 s 停頓後的句子平均 1.3 s（P90 3.7 s）才有完整結果。V
 
 - 198 / 200 句最終文字相同。不同的 2 句：一句句尾「起抵」→「启迪」（錯字 +1），一句補回漏掉的「脸」（錯字 −1），CER 不變。
 - 依「優化階段只跑小集合」，3000 句未重跑。
+
+---
+
+## 2026-11-01　X-ASR onnxruntime 後端調校：執行緒數、session 選項、批次 joiner（B8）
+
+環境：Apple M5（4 效能核 + 6 節能核）、macOS 27.0.1、onnxruntime 1.31.1，`x-asr-480ms-int8-ort` + Silero v6.2.3，A2（pause 150 / min_silence 1000）。評測在 `feat/latency-b1`（`4a2d1d1`）+ 本次提交的程式上執行，全部 `--jobs 1`。
+
+**量測條件的限制**：量測期間有其他工作階段的評測一直佔滿 1 個核心（load average 3–9），單執行緒 RTF 比閒置時的 0.032 高約 40–60%，絕對值不能當基準。比較時同一批交錯重跑（`bench_asr_compute.py --repeat 3` 取中位數），只看相對差異；同一設定重跑的差異約 ±5–7%。多執行緒受負載的影響比單執行緒大（要搶更多核心），因此**多執行緒的結論待閒置時重量**。
+
+### 做了什麼
+
+- `scripts/bench_asr_compute.py`：不經 pipeline，只量計算。每句以 10 ms chunk 送入再 finalize，記錄每次 encoder 推論、每個 chunk 的 greedy search（joiner + decoder）、finalize（= A2 停頓時產生暫定結果的計算）、一次送入整句的重新解碼（= A2 恢復說話時的計算）、Silero 每 frame 的耗時；footprint 沿用 `probe_footprint.py` 的 vmmap 量測。token 序列的雜湊用來比對結果是否改變。每個設定一個子程序，`--threads` × `--preset`（session 選項預設組）取笛卡兒積。
+- `ZipformerOrtAsr` / `SileroVadModel` 多一個 `sess_options` 參數（只給量測用，預設行為不變）。
+- **greedy search 批次送入 joiner**（`ZipformerOrtStream._greedy_search`），見下方。
+
+### 計算時間拆解（單執行緒，60 句）
+
+profile（cProfile）：時間 97% 在 `session.run`，Python 端（fbank 送入、stack、argmax）< 2%。以總時間計，encoder 約 94%（每個 480 ms chunk 約 12 ms，負載較輕時），joiner 約 2.8%（每個 chunk 12 次、每次約 0.03 ms），decoder 0.4%。encoder 圖有 12,261 個節點，其中 4073 個 Constant、數千個 Shape / Gather / Slice / Unsqueeze 等小運算，MatMulInteger 只有 344 個：**每個 chunk 只有 61 frame，時間多花在大量小運算上**，這也是多執行緒幫不上忙的原因。
+
+### 1. 執行緒數 1 / 2 / 4
+
+**全鏈路（`run_eval.py --threads 1 2 4`，負載下）**
+
+| 集合 | threads | CER | RTF | 首字 mean / P90 (ms) | 說完 → 完整結果 mean / P90 (ms) | finalize mean / P90 (ms) | 恢復時重新解碼 mean / P90 (ms) | 峰值 RSS (MB) | 結果與 1 執行緒不同 |
+|---|---|---|---|---|---|---|---|---|---|
+| 300 句對齊集 | **1** | 3.28% | **0.0437** | 982 / 1033 | **248** / 318 | **63** / 76 | **104** / 179 | 358 | — |
+| | 2 | 3.28% | 0.0529 | 985 / 1037 | 260 / 332 | 75 / 90 | 122 / 210 | 363 | 1 / 300 句 |
+| | 4 | 3.35% | 0.0676 | 989 / 1044 | 275 / 344 | 90 / 106 | 146 / 260 | 362 | 4 / 300 句 |
+| 200 句冒煙集 | **1** | 4.80% | **0.0510** | 1013 / 1037 | — | **72** / 89 | **128** / 210 | 364 | — |
+| | 2 | 4.57% | 0.0579 | 1018 / 1039 | — | 81 / 96 | 139 / 222 | 354 | 8 / 200 句 |
+| | 4 | 4.37% | 0.0696 | 1022 / 1046 | — | 92 / 108 | 156 / 255 | 363 | 11 / 200 句 |
+
+（「說完 → 完整結果」以 MFA 真實末字結束點起算，`pause_analysis.py cost`，只有對齊集有。finalize = 暫定結果時刻 − 停頓事件時已送入的音訊終點。冒煙集這三列是批次 joiner 之前的程式，對齊集是之後的程式，同一批內可比。）
+
+**純計算（`bench_asr_compute.py --threads 1 2 4 --preset default no-spin --repeat 3`，60 句）**
+
+| threads | spinning | ASR RTF | encoder mean / P90 (ms) | finalize mean (ms) | 重新解碼 (ms / 音訊 s) | VAD (ms / frame) | 結果不同（/ 60 句） |
+|---|---|---|---|---|---|---|---|
+| 1 | 開（預設） | 0.0485 | 17.7 / 18.3 | 63 | 34.9 | 0.091 | — |
+| 1 | 關 | 0.0450 | 16.4 / 16.9 | 59 | 32.8 | 0.093 | 0 |
+| 2 | 開 | 0.0538 | 19.5 / 20.6 | 71 | 39.4 | 0.100 | 3 |
+| 2 | 關 | 0.0460 | 16.7 / 17.4 | 60 | 33.2 | 0.097 | 3 |
+| 4 | 開 | 0.0596 | 21.4 / 22.5 | 78 | 44.1 | 0.114 | 5 |
+| 4 | 關 | 0.0499 | 18.1 / 18.7 | 65 | 35.9 | 0.106 | 5 |
+
+- **多執行緒沒有加速，在負載下反而更慢**：2 / 4 執行緒的 RTF +21% / +55%（全鏈路），停頓時的 finalize +12 / +27 ms、恢復時的重新解碼 +18 / +42 ms，都直接加在結果延遲上（說完 → 完整結果 +12 / +27 ms）。關掉 spinning 後 2 執行緒與 1 執行緒相同（差異在雜訊內），4 執行緒仍慢約 10%。負載較輕時的初步量測（同 60 句、未重跑）：2 執行緒 encoder −7%、4 執行緒 +17%。原因見上方拆解：圖由大量小運算組成，執行緒同步的開銷蓋過平行化的收益。
+- **多執行緒會改變辨識結果**：純 ASR 上 2 / 4 執行緒有 3 / 5（/ 60）句的 token 不同，全鏈路 200 句 8 / 11 句、300 句 1 / 4 句的最終文字不同。CER 的變化在 200 句信賴區間（約 ±1 個百分點）內，不能當成多執行緒變準（300 句 3.28 / 3.28 / 3.35%）。原因推測是運算拆給多個執行緒後浮點累加順序改變（未深究）。所以**單執行緒的結果才是可重現的基準**。
+- 峰值 RSS 與 footprint 不隨執行緒數變化（±5 MB）。首字延遲幾乎不變（+3–9 ms）：首字主要卡在模型輸出延遲（B1），計算只佔一小部分。
+- **決定：預設維持單執行緒**。VAD 每 frame 約 0.09–0.11 ms（只佔 RTF 約 0.3%），執行緒數一樣沒有幫助。
+
+### 2. ORT session 選項（`bench_asr_compute.py --threads 1 --preset ... --repeat 3`，60 句）
+
+| 選項（ASR 三個 session 與 VAD 都套用） | ASR RTF | encoder mean (ms) | search mean (ms / chunk) | finalize mean (ms) | footprint 載入後 / 峰值 (MB) | 峰值 RSS (MB) | 結果不同 |
+|---|---|---|---|---|---|---|---|
+| 預設（ORT_ENABLE_ALL、arena 開、prepacking 開） | 0.0457 | 16.7 | 0.29 | 60 | 289 / 329 | 366 | — |
+| graph_optimization_level = EXTENDED | 0.0483 | 17.6 | 0.32 | 63 | 284 / 320 | 352 | 0 |
+| graph_optimization_level = BASIC | 0.0609（+33%） | 21.7 | 0.98 | 80 | 281 / 317 | 355 | **2** |
+| enable_cpu_mem_arena = False | 0.0460 | 16.8 | 0.29 | 60 | 288 / 324 | 361 | 0 |
+| enable_mem_pattern = False | 0.0471 | 17.2 | 0.29 | 62 | 284 / 320 | 358 | 0 |
+| session.disable_prepacking = 1 | 0.0951（+108%） | 33.5 | 2.30 | 126 | 283 / 321 | 359 | **2** |
+| session.set_denormal_as_zero = 1 | 0.0464 | 16.9 | 0.29 | 61 | 290 / 328 | 365 | 0 |
+
+- **沒有任何選項同時帶來明顯的速度或記憶體收益**：EXTENDED / 關 arena / 關 mem pattern / denormal 的 RTF 在 ±5% 雜訊內，footprint 差 ≤ 9 MB、RSS 差 ≤ 14 MB（單次量測，未重複確認）。B11 經 sherpa-onnx 時關 arena 也無效，這裡結論相同。
+- **BASIC 與關 prepacking 明顯變慢且改變結果**：兩者都讓 joiner / encoder 的 `DynamicQuantizeLinear + MatMulInteger` 不被融合成 `DynamicQuantizeMatMul`（prepacking 是該融合 kernel 的前提），量化方式改變（下一節），結果不同。
+- 決定：**session 選項維持預設**，只記錄。
+
+### 3. greedy search 批次送入 joiner（採用）
+
+原本每個 encoder frame 呼叫一次 joiner（每 chunk 12 次）。改為：把 chunk 中尚未解碼的 frame 一次送入 joiner（decoder_out 相同），取第一個輸出 token 的 frame，更新 decoder 後從下一個 frame 再批次送入。決策順序與逐 frame 完全相同，呼叫次數降為「1 + 這個 chunk 輸出的 token 數」（平均約 2.2 次）。
+
+**前提是 joiner 逐列獨立**。joiner 是 `Add → Tanh → DynamicQuantizeLinear → MatMulInteger`，依 ONNX 定義，DynamicQuantizeLinear 對整個 tensor 只算一個 scale，批次送入時各列的量化會互相影響。實測：
+- 關閉圖最佳化時，批次與逐列的 logit 最多差 0.156（tanh 輸出各列的範圍不同，例如 max 0.979–0.994）。
+- ORT_ENABLE_ALL / EXTENDED（預設）下，ORT 把它融合成 `DynamicQuantizeMatMul`，arm64 上實際是逐列量化：200 句全部 32,028 個 frame（以初始 decoder_out 批次送入每個 chunk）的批次 logit 與逐列**逐位元相同**。
+- 因此 `ZipformerOrtAsr` 載入時以 8 列不同尺度的隨機輸入自我檢查（`_joiner_is_row_independent`），不成立（例如別的平台或 ORT 版本）就自動退回逐 frame。
+
+**驗證**：200 句冒煙集與 300 句對齊集全鏈路，與改動前逐句相同：hyp 200 / 200、300 / 300 相同；句段 205 / 205、307 / 307 的文字、VAD 起訖、首字在音訊中的位置、partial 次數全部相同；暫定結果的文字也全部相同。新增測試 `test_x_asr_ort_batched_joiner_matches_per_frame`（6 個測試音訊、blank_penalty 1.5，文字與 token 時間相同）。
+
+| 改動前 → 後（負載下，同批） | search (ms / chunk) | ASR RTF（純計算） | 全鏈路 RTF 200 / 300 句 | finalize mean (ms) 300 句 | 恢復時重新解碼 mean (ms) 300 句 | 說完 → 完整結果 mean / P90 (ms) |
+|---|---|---|---|---|---|---|
+| 逐 frame | 0.67 | 0.0504 | 0.0510 / 0.0520 | 75 | 122 | 260 / 325 |
+| **批次** | **0.29** | **0.0457** | **0.0493 / 0.0487** | **70** | **114** | **255 / 321** |
+
+- greedy search 的時間減少 57%，整體約 −3–6%（逐 frame 呼叫的開銷原本就只佔約 3%，量到的整體差異有一部分是雜訊）。這大致抵銷了 ort 後端相對 sherpa-onnx 多出的約 3% RTF。
+- 結果延遲只快約 5 ms：finalize 與重新解碼中 encoder 仍佔 90% 以上。
+
+### 結論
+
+- 這個模型在 CPU 上已經沒有可調的 session 參數：時間幾乎全在 encoder 大量的小運算上，多執行緒與各種 session 選項都沒有收益，而多執行緒、BASIC、關 prepacking 還會改變結果。**預設維持：單執行緒、ORT_ENABLE_ALL、其餘選項為 ORT 預設**。
+- 採用批次 joiner：結果逐句不變，greedy search 時間減半，RTF 與延遲小幅改善。
+- 想再降 encoder 的計算，要從模型本身著手（Core ML / ANE、或把小運算在匯出時常數摺疊），屬於第二階段。
+- 待辦：閒置時重量執行緒 1 / 2 / 4 的 RTF（本次在負載下量測）；依「優化階段只跑小集合」，3000 句未重跑。

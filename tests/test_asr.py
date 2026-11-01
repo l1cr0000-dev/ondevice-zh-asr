@@ -16,7 +16,7 @@ import pytest
 
 from src.asr import SAMPLE_RATE, AsrStream, StreamingAsr, available_models, load_asr
 from src.asr.sherpa import X_ASR_480MS, ZIPFORMER_ZH_14M, SherpaTransducerAsr
-from src.asr.zipformer_ort import tokens_to_text
+from src.asr.zipformer_ort import ZipformerOrtAsr, tokens_to_text
 from src.paths import MODELS_DIR
 from src.vad import load_wav
 
@@ -291,3 +291,18 @@ def test_x_asr_ort_matches_sherpa(model: str, blank_penalty: float) -> None:
         got = _transcribe_with_timestamps(ort_asr, wav)
         assert got[0] == expected[0], wav
         assert got[1] == pytest.approx(expected[1]), wav
+
+
+def test_x_asr_ort_batched_joiner_matches_per_frame() -> None:
+    # greedy search 把一個 chunk 的 frame 批次送進 joiner；決策必須與逐 frame 呼叫完全相同
+    try:
+        asr = load_asr("x-asr-480ms-int8-ort", num_threads=1, blank_penalty=1.5)
+    except FileNotFoundError:
+        pytest.skip("x-asr-480ms-int8 未下載，請先執行 bash scripts/download_models.sh")
+    assert isinstance(asr, ZipformerOrtAsr)
+    assert asr._batch_joiner, "ORT 圖最佳化後的 joiner 應逐列獨立（見 src/asr/zipformer_ort.py）"
+    wavs = sorted(X_ASR_TEST_WAVS.glob("*.wav")) + [TEST_WAVS / w for w in sorted(REFERENCES)]
+    batched = [_transcribe_with_timestamps(asr, wav) for wav in wavs]
+    asr._batch_joiner = False
+    per_frame = [_transcribe_with_timestamps(asr, wav) for wav in wavs]
+    assert batched == per_frame
