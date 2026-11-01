@@ -51,7 +51,7 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 - 一條 wav 被 VAD 切成多段時，各段文字以空白連接後當作這條的假設文字（正規化會去掉空白）。
 - 每條 wav 前面先補 `lead_silence_ms`（預設 1000 ms）的數位靜音（全零樣本）再送入，作為端到端首字延遲的起點。結果 JSON 中的位置（`speech_start_s` 等）都換回原始音訊的時間軸（補靜音結束 = 0）。設 `--lead-silence-ms 0` 可重現 2026-10-30 以前的設定。
 - 每條 wav 後面再補 `tail_silence_ms`（預設 1500 ms）的數位靜音，讓句子以 VAD 的靜音計時收尾，而不是由音訊結束（flush）收尾，尾字延遲才不會被截斷（見尾字延遲）。設 `--tail-silence-ms 0` 可重現 2026-10-31 以前的設定；結果名稱非 0 時加 `_tail<值>`。
-- 單執行緒（VAD 與 ASR 的 ONNX Runtime intra-op 都是 1）、CPU。
+- 單執行緒（VAD 與 ASR 的 ONNX Runtime intra-op 都是 1）、CPU。`--threads 2 / 4` 沒有加速且會改變少數句子的結果（progress.md 2026-11-01「X-ASR onnxruntime 後端調校」）；計算時間的細部拆解用 `scripts/bench_asr_compute.py`。
 
 ### 並行（`--jobs`）
 

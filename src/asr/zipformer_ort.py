@@ -14,6 +14,12 @@
 - greedy search：decoder 初始輸入為 [-1, blank]（context_size 2）；每個 encoder frame 跑一次 joiner，
   blank_penalty > 0 時從 blank 的 logit 減去，取 argmax；不是 blank / <unk> 就輸出並更新 decoder。
   每個 frame 最多輸出一個 token。
+  實作上把 chunk 中尚未解碼的 frame 一次送進 joiner（decoder_out 相同），取第一個輸出 token 的 frame，
+  更新 decoder 後從下一個 frame 再批次送入；與逐 frame 呼叫的決策完全相同，呼叫次數由每 chunk 12 次
+  降到「1 + 輸出 token 數」。前提是 joiner 的批次輸出與逐列輸出逐位元相同：joiner 的
+  DynamicQuantizeLinear 依 ONNX 定義是整個 tensor 共用一個 scale，但 ORT 圖最佳化（EXTENDED 以上）
+  把它與 MatMulInteger 融合成 DynamicQuantizeMatMul，arm64 上是逐列量化，批次不影響結果
+  （關掉最佳化時逐列與批次的 logit 最多差 0.16）。載入時以隨機輸入自我檢查，不成立就退回逐 frame。
 - 文字：token 開頭的「▁」視為空白，但前後都是非 ASCII（中文）時省略，最後去掉首尾空白
   （例：「昨天是 MONDAY TODAY IS 礼拜二」）。
 """
@@ -82,22 +88,30 @@ class ZipformerOrtStream(AsrStream):
             )
             self._states = outputs[1:]
             encoder_out = outputs[0][0]
-            for t in range(len(encoder_out)):
-                (logit,) = asr._joiner.run(
-                    ["logit"],
-                    {"encoder_out": encoder_out[t : t + 1], "decoder_out": self._decoder_out},
-                )
-                logit = logit[0]
-                if asr.config.blank_penalty > 0:
-                    logit[0] -= asr.config.blank_penalty
-                y = int(logit.argmax())
-                if y != 0 and y != asr._unk_id:
-                    self._tokens.append(y)
-                    self._frames.append(self._frame_offset + t)
-                    self._decoder_out = asr.run_decoder(
-                        [*asr._context_prefix, *self._tokens][-asr._context_size :]
-                    )
+            self._greedy_search(encoder_out)
             self._frame_offset += len(encoder_out)
+
+    def _greedy_search(self, encoder_out: npt.NDArray[np.float32]) -> None:
+        """一個 chunk 的 greedy search（見模組說明：批次送入 joiner，決策與逐 frame 相同）。"""
+        asr = self._asr
+        t = 0
+        while t < len(encoder_out):
+            rows = encoder_out[t:] if asr._batch_joiner else encoder_out[t : t + 1]
+            logits = asr.run_joiner(rows, self._decoder_out)
+            if asr.config.blank_penalty > 0:
+                logits[:, 0] -= asr.config.blank_penalty
+            ys = logits.argmax(axis=1)
+            (emit,) = np.nonzero((ys != 0) & (ys != asr._unk_id))
+            if len(emit) == 0:
+                t += len(rows)
+                continue
+            t += int(emit[0])
+            self._tokens.append(int(ys[emit[0]]))
+            self._frames.append(self._frame_offset + t)
+            self._decoder_out = asr.run_decoder(
+                [*asr._context_prefix, *self._tokens][-asr._context_size :]
+            )
+            t += 1
 
     def _accept(self, chunk: npt.NDArray[np.float32]) -> None:
         self._fbank.accept_waveform(SAMPLE_RATE, chunk.tolist())
@@ -124,7 +138,10 @@ class ZipformerOrtAsr(StreamingAsr):
         files: TransducerFiles,
         config: OrtTransducerConfig | None = None,
         models_dir: Path = MODELS_DIR,
+        sess_options: Any = None,
     ) -> None:
+        """`sess_options`：自訂的 `ort.SessionOptions`（量測 session 選項用，見
+        scripts/bench_asr_compute.py）；給定時執行緒數以它為準。"""
         import kaldi_native_fbank as knf  # type: ignore[import-untyped]
         import onnxruntime as ort  # type: ignore[import-untyped]
 
@@ -137,9 +154,11 @@ class ZipformerOrtAsr(StreamingAsr):
                 "找不到模型檔，請先執行 bash scripts/download_models.sh：\n  "
                 + "\n  ".join(missing)
             )
-        opts: Any = ort.SessionOptions()
-        opts.intra_op_num_threads = self.config.num_threads
-        opts.inter_op_num_threads = 1
+        opts: Any = sess_options
+        if opts is None:
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = self.config.num_threads
+            opts.inter_op_num_threads = 1
 
         def session(name: str) -> Any:
             # 以檔案路徑建立 session（不先讀進記憶體）
@@ -191,6 +210,32 @@ class ZipformerOrtAsr(StreamingAsr):
         self._fbank_opts = fbank
         self._knf = knf
         self._init_decoder_out = self.run_decoder(self._context_prefix)
+        self._batch_joiner = self._joiner_is_row_independent()
+
+    def _joiner_is_row_independent(self) -> bool:
+        """joiner 批次輸出是否與逐列輸出逐位元相同（見模組說明）。各列刻意用不同的數值範圍。"""
+        rng = np.random.default_rng(0)
+        dim = self._init_decoder_out.shape[-1]
+        rows = (rng.standard_normal((8, dim)) * np.linspace(0.2, 3.0, 8)[:, None]).astype(
+            np.float32
+        )
+        batch = self.run_joiner(rows, self._init_decoder_out)
+        single = np.concatenate([self.run_joiner(r[None], self._init_decoder_out) for r in rows])
+        return bool(np.array_equal(batch, single))
+
+    def run_joiner(
+        self, encoder_out: npt.NDArray[np.float32], decoder_out: npt.NDArray[np.float32]
+    ) -> npt.NDArray[np.float32]:
+        """encoder_out [N, D] 各列與同一個 decoder_out [1, D] 的 logit [N, vocab]。"""
+        (out,) = self._joiner.run(
+            ["logit"],
+            {
+                "encoder_out": encoder_out,
+                "decoder_out": np.repeat(decoder_out, len(encoder_out), axis=0),
+            },
+        )
+        result: npt.NDArray[np.float32] = out
+        return result
 
     def run_decoder(self, context: list[int]) -> npt.NDArray[np.float32]:
         (out,) = self._decoder.run(["decoder_out"], {"y": np.array([context], dtype=np.int64)})

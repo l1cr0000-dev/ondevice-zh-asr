@@ -77,7 +77,7 @@
 
 ### B8　其他評測缺口（P2）
 
-- 多執行緒 RTF（CLAUDE.md 要求另報）。
+- ~~多執行緒 RTF（CLAUDE.md 要求另報）~~ **2026-11-01 已量**（progress.md「X-ASR onnxruntime 後端調校」，200 / 300 句）：`x-asr-480ms-int8-ort` 2 / 4 執行緒沒有加速（負載下 RTF +21% / +55%，關 spinning 後 2 執行緒持平），停頓時的 finalize 與恢復時的重新解碼變慢，且會改變 1–5% 句子的結果；預設維持單執行緒。ORT session 選項（圖最佳化等級、arena、mem pattern、prepacking、denormal）都沒有收益。**未做**：量測時有其他程序佔用 CPU，閒置時重量執行緒 1 / 2 / 4 的 RTF。
 - X-ASR 參數量（可用 `onnx` 套件統計 initializer）。
 - 正式評測集已改為 3000 句（CER 信賴區間以句重抽約 ±0.27 個百分點，X-ASR）。VAD / pre-roll 掃描仍是 200 句子集上的結果，之後的參數選擇要在 3000 句集上重做。
 - 評測音訊來自第三方鏡像（`shenyunhang/AISHELL-1`），無法對官方 checksum 驗證。
