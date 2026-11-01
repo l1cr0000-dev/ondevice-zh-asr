@@ -61,8 +61,9 @@ def add_pipeline_args(p: argparse.ArgumentParser, sweep: bool = False) -> None:
         p.add_argument(
             "--pause-ms",
             type=non_negative_int,
-            default=0,
-            help="靜音滿此值先輸出暫定結果、滿 --min-silence-ms 才定稿（0 = 關閉；需小於 min_silence）",
+            default=vad.pause_ms or 0,
+            help="靜音滿此值先輸出暫定結果、滿 --min-silence-ms 才定稿（0 = 關閉；需小於 min_silence）。"
+            "退回舊的單一門檻：--min-silence-ms 500 --pause-ms 0",
         )
         p.add_argument(
             "--provisional",

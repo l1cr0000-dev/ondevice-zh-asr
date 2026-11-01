@@ -168,8 +168,8 @@ def test_final_text_ready_is_first_partial_equal_to_final() -> None:
 def test_provisional_redecodes_utterance_and_final_spans_pause() -> None:
     # 1.0–2.0 s 說話，停 0.4 s，2.4–3.0 s 再說：pause 200 ms 先給暫定結果，min_silence 600 ms 不切開
     audio = _tones((1.0, 2.0), (2.4, 3.0), total_s=4.5)
-    config = PipelineConfig(VadConfig(min_silence_ms=600, pause_ms=200, speech_pad_ms=0))
-    (utt,), asr = _run_fake(audio, config)
+    vad = VadConfig(min_silence_ms=600, pause_ms=200, speech_pad_ms=0)
+    (utt,), asr = _run_fake(audio, PipelineConfig(vad, provisional="redecode"))
     main, *redecoded = asr.streams
     assert len(utt.provisionals) == len(redecoded) == 2
     first, last = utt.provisionals
@@ -209,9 +209,21 @@ def test_finalize_mode_without_resume_keeps_provisional_as_final() -> None:
     assert utt.text == prov.text and utt.final_s is not None and prov.emitted_s < utt.final_s
 
 
+def test_default_is_two_threshold_finalize() -> None:
+    # 預設 = B9 方案 A2：停頓 200 ms 先 finalize 出暫定結果，靜音 1000 ms 定稿
+    config = PipelineConfig()
+    assert (config.vad.pause_ms, config.vad.min_silence_ms) == (200, 1000)
+    assert config.provisional == "finalize"
+    audio = _tones((1.0, 2.0), total_s=3.5)
+    (utt,), asr = _run_fake(audio, config)
+    (prov,) = utt.provisionals
+    assert len(asr.streams) == 1 and asr.streams[0].is_finalized and prov.text == utt.text
+
+
 def test_no_provisional_without_pause_ms() -> None:
+    # 舊的單一門檻 500 ms
     audio = _tones((1.0, 2.0), total_s=3.0)
-    (utt,), asr = _run_fake(audio, PipelineConfig())
+    (utt,), asr = _run_fake(audio, PipelineConfig(VadConfig(min_silence_ms=500)))
     assert utt.provisionals == [] and len(asr.streams) == 1
 
 
@@ -274,9 +286,11 @@ def models() -> tuple[SileroVadModel, StreamingAsr]:
 
 
 def test_end_to_end_two_utterances(models: tuple[SileroVadModel, StreamingAsr]) -> None:
+    # fixture 兩句間隔 1.0 s，預設 min_silence 1000 ms 不切開；這裡用舊的單一門檻 500 ms 檢查切段
     vad_model, asr = models
     truth = json.loads(SPEECH_WAV.with_suffix(".json").read_text())["segments"]
-    utts = transcribe(load_wav(SPEECH_WAV), vad_model, asr, chunk_ms=10)
+    config = PipelineConfig(VadConfig(min_silence_ms=500))
+    utts = transcribe(load_wav(SPEECH_WAV), vad_model, asr, config, chunk_ms=10)
 
     assert len(utts) == len(truth)
     for utt, ref, ref_text in zip(utts, truth, REFERENCES, strict=True):
@@ -298,6 +312,21 @@ def test_end_to_end_two_utterances(models: tuple[SileroVadModel, StreamingAsr]) 
         assert all(len(a.text) <= len(b.text) for a, b in pairwise(utt.partials))
         assert utt.text.startswith(utt.partials[-1].text)
     assert utts[0].final_s is not None and utts[0].final_s < utts[1].start_emitted_s
+
+
+def test_end_to_end_default_gives_provisional_per_sentence(
+    models: tuple[SileroVadModel, StreamingAsr],
+) -> None:
+    # 預設兩段門檻（A2）：兩句合成一段定稿，但第一句說完 200 ms 就先有暫定結果
+    vad_model, asr = models
+    truth = json.loads(SPEECH_WAV.with_suffix(".json").read_text())["segments"]
+    (utt,) = transcribe(load_wav(SPEECH_WAV), vad_model, asr, chunk_ms=10)
+    assert jiwer.cer("".join(REFERENCES), utt.text) <= 0.15, utt.text
+    first, *_, last = utt.provisionals
+    assert jiwer.cer(REFERENCES[0], first.text) <= 0.15, first.text
+    assert first.emitted_s - truth[0]["end"] < 0.5
+    assert last.text == utt.text and utt.final_s is not None and last.emitted_s < utt.final_s
+    assert len(utt.resume_redecode_s) == 1
 
 
 def test_end_to_end_independent_of_chunk_size(

@@ -8,7 +8,7 @@ uv run scripts/prepare_eval_data.py -n 200   # 200 句冒煙子集
 uv run eval/run_eval.py                  # 預設設定，3000 句正式評測集
 uv run eval/run_eval.py --smoke          # 200 句子集，快速確認沒有改壞（約 1 分鐘 / 模型）
 uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
-    --min-silence-ms 100 300 500 800 --pre-roll-ms 0 100 200 300 --tag sweep   # 參數掃描
+    --min-silence-ms 100 300 500 800 --pause-ms 0 --pre-roll-ms 0 100 200 300 --tag sweep   # 參數掃描
 ```
 
 多個值的參數（`--model`、`--min-silence-ms`、`--pre-roll-ms`、`--chunk-ms`、`--threads`）取笛卡兒積。
@@ -152,7 +152,9 @@ VAD 起點首字延遲的細節：
 
 ### 暫定結果（`--pause-ms`）
 
-`--provisional finalize` 改用方案 A2（停頓時 finalize 原 stream、恢復說話時才重新解碼，結果名稱加 `fin`），此時 `redecode_ms` 是補零 finalize 的耗時，`resume_redecode_ms` 是每次恢復時重新解碼的耗時。`--pause-ms N`（N < min_silence）開啟方案 A：靜音滿 N ms 先輸出暫定結果（重新解碼整句），滿 min_silence 才定稿（pipeline 模組說明）。結果 JSON 每個句段多 `provisionals`（`emitted_s`、`audio_end_s`、`text`），`metrics.provisional`：
+**2026-11-01 起預設為方案 A2**（`--min-silence-ms 1000 --pause-ms 200 --provisional finalize`，結果名稱 `_sil1000_…_pause200fin`）；退回舊的單一門檻 500 ms 用 `--min-silence-ms 500 --pause-ms 0`（`--pause-ms 0` 時 `--provisional` 沒有作用）。掃描 `--min-silence-ms` 時記得一起給 `--pause-ms 0`，否則每個門檻都會開暫定結果（pause 不小於 min_silence 的組合略過）。
+
+`--provisional finalize` 為方案 A2（停頓時 finalize 原 stream、恢復說話時才重新解碼，結果名稱加 `fin`），此時 `redecode_ms` 是補零 finalize 的耗時，`resume_redecode_ms` 是每次恢復時重新解碼的耗時。`--pause-ms N`（N < min_silence）開啟方案 A：靜音滿 N ms 先輸出暫定結果（重新解碼整句），滿 min_silence 才定稿（pipeline 模組說明）。結果 JSON 每個句段多 `provisionals`（`emitted_s`、`audio_end_s`、`text`），`metrics.provisional`：
 
 | 欄位 | 定義 |
 |---|---|

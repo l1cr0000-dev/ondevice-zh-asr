@@ -95,13 +95,20 @@ uv run scripts/run_pipeline.py [input.wav] -o out.json  # VAD + ASR：每句文�
 uv run scripts/demo_mic.py                # 麥克風即時辨識，Ctrl+C 結束並印出首字延遲統計
 ```
 
+預設的結束判定是兩段門檻（方案 A2）：句中靜音 200 ms 先 finalize 出暫定結果（標「（暫定）」），靜音滿 1000 ms 才定稿；暫定結果之後若又開始說話，會重新解碼整句並修正。上面三個腳本與 `eval/run_eval.py` 都可用 `--min-silence-ms 500 --pause-ms 0` 退回舊的單一門檻 500 ms。
+
+```bash
+```
+
 第一次跑 `demo_mic.py` 時 macOS 會詢問麥克風權限；若曾拒絕，腳本會提示到「系統設定 → 隱私權與安全性 → 麥克風」開啟。
 
 評測：
 
 ```bash
 uv run scripts/prepare_eval_data.py       # 下載並抽樣 AISHELL-1 test 3000 句（約 470 MB，固定 seed，逐檔 SHA-256 校驗）
-uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m   # 重現下方基準表（X-ASR 約 9 分鐘、zh-14M 約 4 分鐘）
+uv run eval/run_eval.py                   # 預設設定（結束判定 A2），3000 句
+uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m --min-silence-ms 500 --pause-ms 0
+                                          # 重現下方基準表（單一門檻 500 ms；X-ASR 約 9 分鐘、zh-14M 約 4 分鐘）
 
 uv run scripts/prepare_eval_data.py -n 200   # 200 句冒煙子集（約 32 MB）
 uv run eval/run_eval.py --smoke           # 改動後快速確認沒有改壞，每個模型約 1 分鐘
@@ -112,6 +119,20 @@ uv run eval/run_eval.py --smoke           # 改動後快速確認沒有改壞，
 已驗證的環境：Apple M5 / macOS 27.0.1 / Python 3.11.15 / onnxruntime 1.31.1 / sherpa-onnx 2.0.1。
 
 ## 基準指標
+
+**預設設定：結束判定方案 A2**（pause 200 ms / min_silence 1000 ms，2026-11-01 起），相對下表的單一門檻 500 ms：
+
+| | 單一門檻 500 ms（舊預設） | **A2（預設）** |
+|---|---|---|
+| CER，3000 句 | 4.11% | **3.75%**（成對差 −0.36 個百分點，95% CI [−0.46, −0.26]） |
+| 說完 → 完整結果（真實末字結束起算，300 句對齊集，mean / P50 / P90 ms） | 580 / 581 / 651 | **299 / 295 / 366** |
+| 連續多句集：停頓 0.3 / 0.5 s 後的句子（mean ms） | 5806 / 2256（兩句被合併） | **約 290** |
+| 先出半句暫定結果、之後被修正的句子 | — | 35% |
+| RTF（300 句對齊集） | 0.027 | 0.033 |
+
+A2 的數字出自 commit `b311a49` + `8e9b618` 的程式（3000 句以 `--jobs 4` 只看 CER）；改為預設後在 200 句冒煙集、300 句對齊集與連續多句集上重跑，最終文字與暫定結果逐句相同。各方案比較見 [docs/scoreboard.md](docs/scoreboard.md)，決定紀錄見 [docs/progress.md](docs/progress.md) 2026-11-01。
+
+下表各模型的完整指標是在**單一門檻 500 ms** 下量的（2026-10-31，改預設前），用來比較模型；首字延遲與結束判定無關。
 
 評測集：AISHELL-1 test 隨機 3000 句（seed 20261030，佔 test set 42%，251.2 分鐘，20 位說話人）　|　Apple M5（Mac17,3）/ macOS 27.0.1　|　commit `43282fe` + 本次提交的程式（2026-10-31）
 CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句、每條前補 1 秒、後補 1.5 秒靜音；VAD 為 Silero v6.2.3（threshold 0.5、min_speech 250 ms、min_silence 500 ms、pad 30 ms）、pre-roll 100 ms。
@@ -171,7 +192,7 @@ CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句、每條前補 1 �
 **系統**
 
 - **首字延遲約 1 秒**（VAD 起點），計算每個 chunk 約 13 ms，換 Core ML / ANE 無法改善。換 160 ms chunk 只快約 130 ms 且 CER 顯著變差：瓶頸是模型多晚輸出第一個字：字級對齊顯示模型在首字唸完約 190 ms 後才輸出它（見 [docs/latency-analysis.md](docs/latency-analysis.md)）。
-- **單一靜音閾值無法同時切對句中停頓與句間停頓**：min_silence 500 ms 時 15% 的單句音訊被切成多段（這些句子 CER 8.4%，其餘 3.2%）；門檻拉到 1000 ms，CER 4.11 → 3.70%，但最終結果晚約 530 ms，且短於門檻的句間停頓會讓兩句合併，前一句的最終結果要等下一句說完（連續多句集上平均延後約 5 秒）。自然口語的句間停頓可短至 290 ms。見 [docs/scoreboard.md](docs/scoreboard.md)。
+- **結束判定用兩段門檻（A2）緩解，但沒有根治**：單一靜音門檻無法同時切對句中停頓與句間停頓（500 ms 時 15% 的單句音訊被切成多段；1000 ms 則短於門檻的句間停頓會讓兩句合併，前一句的最終結果要等下一句說完）。預設的 A2 在停頓 200 ms 時先給暫定結果、1000 ms 才定稿，使用者約 300 ms 就看到結果，代價是 35% 的句子先出現半句暫定結果再被修正、RTF 0.027 → 0.033；短於 0.3 s 的句間停頓仍會被合併（停頓 0.2 s 的句子平均約 1.3 s 才看到完整結果）。早 finalize 偶爾漏句尾的字，CER 比不早 finalize 的方案 A 高 0.05 個百分點。見 [docs/scoreboard.md](docs/scoreboard.md)。
 - **記憶體偏重**：X-ASR 載入後 RSS 比載入前多約 435 MB，遠大於模型檔 164 MB。關掉 ONNX Runtime 的 CPU memory arena 沒有效果（載入與峰值都在 ±1 MB 內），增加發生在載入階段而非推論；多出的部分是 sherpa-onnx 2.0.1 內附的 ONNX Runtime 1.28.2 在載入時留下約 180–190 MB 已釋放但未歸還的 malloc 記憶體（碎片），不是權重存了兩份；ORT 1.30.0 起沒有這個現象。見 [docs/progress.md](docs/progress.md)。
 - 目前只跑 CPU；只在 macOS 驗證過。
 

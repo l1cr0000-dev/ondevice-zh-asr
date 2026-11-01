@@ -3,7 +3,8 @@
 用法：
     uv run scripts/run_pipeline.py                          # 用 tests/fixtures 的兩句測試音訊
     uv run scripts/run_pipeline.py input.wav -o out.json
-    uv run scripts/run_pipeline.py input.wav --min-silence-ms 400 --partials
+    uv run scripts/run_pipeline.py input.wav --partials
+    uv run scripts/run_pipeline.py input.wav --min-silence-ms 500 --pause-ms 0   # 舊的單一門檻 500 ms
 
 時間欄位以秒為單位、以音訊開頭為 0。`*_emitted_s` / `first_token_s` / `final_s` 是「模擬即時」的時刻：
 假設音訊依實際時長節奏、每 --chunk-ms 送入一次，再加上實際量測的計算時間（不真的 sleep）。
@@ -65,6 +66,11 @@ def utterance_json(utt: Utterance, with_partials: bool) -> dict[str, Any]:
             None if utt.tail_latency_s is None else utt.tail_latency_s * 1000
         ),
     }
+    # 暫定結果（預設的兩段門檻：停頓 pause_ms 先給，之後恢復說話會被修正）
+    out["provisionals"] = [
+        {"emitted_s": _round(p.emitted_s), "audio_end_s": _round(p.audio_end_s), "text": p.text}
+        for p in utt.provisionals
+    ]
     if with_partials:
         out["partials"] = [{"emitted_s": _round(p.emitted_s), "text": p.text} for p in utt.partials]
     return out
@@ -94,6 +100,7 @@ def main() -> int:
             "vad": VAD_MODEL_NAME,
             "vad_config": asdict(config.vad),
             "pre_roll_ms": config.pre_roll_ms,
+            "provisional": config.provisional,
             "chunk_ms": args.chunk_ms,
             "threads": args.threads,
             "timing": "simulated-realtime",
