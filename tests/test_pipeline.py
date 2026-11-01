@@ -210,9 +210,9 @@ def test_finalize_mode_without_resume_keeps_provisional_as_final() -> None:
 
 
 def test_default_is_two_threshold_finalize() -> None:
-    # 預設 = B9 方案 A2：停頓 200 ms 先 finalize 出暫定結果，靜音 1000 ms 定稿
+    # 預設 = B9 方案 A2（pause 150）：停頓 150 ms 先 finalize 出暫定結果，靜音 1000 ms 定稿
     config = PipelineConfig()
-    assert (config.vad.pause_ms, config.vad.min_silence_ms) == (200, 1000)
+    assert (config.vad.pause_ms, config.vad.min_silence_ms) == (150, 1000)
     assert config.provisional == "finalize"
     audio = _tones((1.0, 2.0), total_s=3.5)
     (utt,), asr = _run_fake(audio, config)

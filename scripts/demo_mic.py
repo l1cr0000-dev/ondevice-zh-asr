@@ -5,7 +5,7 @@
     uv run scripts/demo_mic.py --list-devices        # 列出輸入裝置
     uv run scripts/demo_mic.py --device 2
     uv run scripts/demo_mic.py --model sensevoice-small-int8-p480
-    # 預設是兩個門檻（方案 A2）：靜音 200 ms 先給暫定結果，1000 ms 才定稿；退回舊的單一門檻 500 ms：
+    # 預設是兩個門檻（方案 A2）：靜音 150 ms 先給暫定結果，1000 ms 才定稿；退回舊的單一門檻 500 ms：
     uv run scripts/demo_mic.py --min-silence-ms 500 --pause-ms 0
 
 Ctrl+C 結束，印出本次統計（句數、首字延遲與「說完 → 結果」的平均 / P50 / P90）。

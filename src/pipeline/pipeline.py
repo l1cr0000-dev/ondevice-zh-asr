@@ -37,14 +37,15 @@ from src.vad import FrameClassifier, StreamingVad, VadConfig, VadEvent
 
 
 def _default_vad() -> VadConfig:
-    # 兩段門檻（B9 方案 A2，配合 provisional="finalize"）：靜音 200 ms 先 finalize 出暫定結果，1000 ms 才定稿。
+    # 兩段門檻（B9 方案 A2，配合 provisional="finalize"）：靜音 150 ms 先 finalize 出暫定結果，1000 ms 才定稿。
+    # pause 150（frame 對齊後 160 ms）而非 200：200 實際要 224 ms，0.2 s 的句間停頓有 39% 抓不到（B9）。
     # AISHELL-1 test 3000 句（docs/progress.md 2026-11-01）：相對舊的單一門檻 500 ms，說完 → 完整結果
     # 580 → 299 ms、CER 4.11 → 3.75 %；代價是約 35 % 的句子先出半句暫定結果、RTF 0.027 → 0.033。
     # 舊的單一門檻：VadConfig(min_silence_ms=500)（命令列 --min-silence-ms 500 --pause-ms 0）。
     # 其餘參數維持上游 Silero 預設值。VAD 模組本身的預設值不變。
     # 2026-11-01 B9：pause 150（實際 160 ms）可讓 0.2 s 的句間停頓也出暫定結果（連續集 1314 → 232 ms），
     # 代價是半句暫定結果的句子 36 → 40 %、解碼量 +3–8 %；是否改預設待決定（--pause-ms 150）。
-    return VadConfig(min_silence_ms=1000, pause_ms=200)
+    return VadConfig(min_silence_ms=1000, pause_ms=150)
 
 
 @dataclass(frozen=True)

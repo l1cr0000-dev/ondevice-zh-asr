@@ -217,7 +217,7 @@ def test_run_eval_end_to_end(tmp_path: Path) -> None:
     assert m["segments_per_utterance"]["max"] == 1
     assert 0 < m["first_token_latency_ms"]["mean"] < 2000
     assert res["config"]["lead_silence_ms"] == 1000 and res["config"]["tail_silence_ms"] == 1500
-    assert result_file.stem.endswith("_lead1000_tail1500_pause200fin")  # 預設兩段門檻（A2）
+    assert result_file.stem.endswith("_lead1000_tail1500_pause150fin")  # 預設兩段門檻（A2，pause 150）
     (utt,) = res["utterances"]
     assert utt["processed_s"] == pytest.approx(utt["duration_s"] + 2.5, abs=1e-3)
     # 句尾補足靜音後，最後一句由 VAD 靜音計時收尾：尾字延遲 ≈ min_silence（預設 1000 ms）

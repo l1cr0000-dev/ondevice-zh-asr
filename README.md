@@ -95,7 +95,7 @@ uv run scripts/run_pipeline.py [input.wav] -o out.json  # VAD + ASR：每句文�
 uv run scripts/demo_mic.py                # 麥克風即時辨識，Ctrl+C 結束並印出首字延遲統計
 ```
 
-預設的結束判定是兩段門檻（方案 A2）：句中靜音 200 ms 先 finalize 出暫定結果（標「（暫定）」），靜音滿 1000 ms 才定稿；暫定結果之後若又開始說話，會重新解碼整句並修正。上面三個腳本與 `eval/run_eval.py` 都可用 `--min-silence-ms 500 --pause-ms 0` 退回舊的單一門檻 500 ms。
+預設的結束判定是兩段門檻（方案 A2）：句中靜音 150 ms 先 finalize 出暫定結果（標「（暫定）」），靜音滿 1000 ms 才定稿；暫定結果之後若又開始說話，會重新解碼整句並修正。上面三個腳本與 `eval/run_eval.py` 都可用 `--min-silence-ms 500 --pause-ms 0` 退回舊的單一門檻 500 ms。
 
 ```bash
 ```
@@ -120,7 +120,7 @@ uv run eval/run_eval.py --smoke           # 改動後快速確認沒有改壞，
 
 ## 基準指標
 
-**預設設定：結束判定方案 A2**（pause 200 ms / min_silence 1000 ms，2026-11-01 起），相對下表的單一門檻 500 ms：
+**預設設定：結束判定方案 A2**（pause 150 ms / min_silence 1000 ms；2026-11-01 起，pause 由 200 改為 150），相對下表的單一門檻 500 ms。下表 A2 欄是 pause 200 時量的；改為 150 後，300 句對齊集的結果延遲再降約 55 ms，0.2 s 句間停頓後的句子從約 1.3 s 降到約 230 ms，先出半句暫定結果的句子 36% → 40%，CER 不變（見 [docs/scoreboard.md](docs/scoreboard.md)）：
 
 | | 單一門檻 500 ms（舊預設） | **A2（預設）** |
 |---|---|---|
