@@ -200,6 +200,10 @@ def worker(cfg: RunConfig, shard: int = 0, num_shards: int = 1) -> dict[str, Any
                         "final_text_ready_s": shift(u.final_text_ready_s),
                         "final_s": shift(u.final_s),
                         "num_partials": len(u.partials),
+                        # 每次 partial 變化的時刻與文字（穩定度指標，eval/stability.py）
+                        "partials": [
+                            {"emitted_s": p.emitted_s - lead_s, "text": p.text} for p in u.partials
+                        ],
                         "provisionals": [
                             {
                                 "emitted_s": p.emitted_s - lead_s,
@@ -345,6 +349,7 @@ def summarize_run(
         seg_hist[key] = seg_hist.get(key, 0) + 1
 
     from eval.segmentation import summarize_provisionals
+    from eval.stability import summarize_stability
 
     segmentation = None
     if utts and all("sentences" in u for u in utts):
@@ -388,6 +393,7 @@ def summarize_run(
             },
             "segmentation": segmentation,
             "provisional": summarize_provisionals(utts),
+            "stability": summarize_stability(utts),
             "memory_mb": raw["memory_mb"],
             "model_size_mb": model_bytes / 2**20,
             "load_s": raw["load_s"],
@@ -555,6 +561,20 @@ def print_detail(res: dict[str, Any]) -> None:
                     f"P90 {_fmt(rd['p90'])} ms，恢復時重新解碼 {pv['resume_redecode_ms']['n']} 次 "
                     f"mean {_fmt(pv['resume_redecode_ms']['mean'])} / "
                     f"P90 {_fmt(pv['resume_redecode_ms']['p90'])} ms"
+                ),
+            )
+        )
+    st = m.get("stability")
+    if st is not None:
+        sd = st["stable_delay_ms"]
+        lines.append(
+            (
+                "partial 穩定度",
+                (
+                    f"修正 {st['unstable_update_rate'] * 100:.1f}% 的更新，被改掉的字 / 最終字數 "
+                    f"{st['revised_token_ratio'] * 100:.1f}%（每條 mean "
+                    f"{st['revised_tokens_per_utterance']['mean']:.2f}），前綴穩定延遲 mean "
+                    f"{_fmt(sd['mean'])} / P90 {_fmt(sd['p90'])} ms"
                 ),
             )
         )
