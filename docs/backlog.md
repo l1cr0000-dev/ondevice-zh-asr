@@ -87,6 +87,7 @@
 - 正式評測集已改為 3000 句（CER 信賴區間以句重抽約 ±0.27 個百分點，X-ASR）。VAD / pre-roll 掃描仍是 200 句子集上的結果，之後的參數選擇要在 3000 句集上重做。
 - 評測音訊來自第三方鏡像（`shenyunhang/AISHELL-1`），無法對官方 checksum 驗證。
 - 只在一台 Apple M5 Mac、CPU 上驗證過；其他 Apple Silicon 機型的數字未知。
+- ~~partial 穩定度（畫面文字跳動）~~ **2026-11-02 已加**（`metrics.stability`，progress.md「partial 穩定度」）：X-ASR 的跳動只有 A2 暫定結果縮回再補回（被改字 3–6%），SenseVoice 偽串流 13–46%。**後續**：(1) pipeline / demo 加 hold 顯示規則（恢復說話後 partial 追上暫定結果前不換），模擬可把 X-ASR 修正率 5–9% → 0.1–0.2%、延遲不變；(2) 偽串流若要當預設，先找不犧牲首字的穩定方法（濾掉第一個 ASCII 碎片 partial、未穩定的字淡色顯示），合併 `feat/pseudo-stream` 後在主分支重量 max3。
 
 ---
 
