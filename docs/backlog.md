@@ -2,7 +2,7 @@
 
 持續更新的清單：已知問題、要做的優化、優先順序。做完的項目移到最下方「已完成」，並在 [progress.md](progress.md) 寫實驗紀錄。數字出自 2026-10-30 的 AISHELL-1 掃描（commit `f576d57`），細節見 progress.md。
 
-**目前狀態（2026-11-02）**：預設為 X-ASR 480 ms INT8 + onnxruntime 1.31.1 直接推論（峰值 RSS 541 → 353 MB）、結束判定 A2（pause 150 / min_silence 1000）、greedy search 批次 joiner；SenseVoice 支援熱詞（CTC prefix beam search，選項）。B1 推論端已到頭，B9 方案定案，B8 CPU 調校無可再調。未合併的實驗分支（small CTC、偽串流降計算量、B4 車內噪音、B11 評測 RSS、B7 取消 FP32）見 progress.md「未合併分支的實驗紀錄」。進行中（2026-11-02 分派）：B0 麥克風真實延遲、partial 穩定度指標（B14）、onnxruntime CoreML EP 前哨（第二階段）。
+**目前狀態（2026-11-02）**：預設為 X-ASR 480 ms INT8 + onnxruntime 1.31.1 直接推論（峰值 RSS 541 → 353 MB）、結束判定 A2（pause 150 / min_silence 1000）、greedy search 批次 joiner；SenseVoice 支援熱詞（CTC prefix beam search，選項）。B1 推論端已到頭，B9 方案定案，B8 CPU 調校無可再調。未合併的實驗分支（small CTC、偽串流降計算量、B4 車內噪音、B11 評測 RSS、B7 取消 FP32）見 progress.md「未合併分支的實驗紀錄」。進行中（2026-11-02 分派）：partial 穩定度指標（B14）、onnxruntime CoreML EP 前哨（第二階段）。
 **暫緩（使用者決定，2026-11-01）**：噪音測試加強（SNR 定義）、跨領域評測集（B6a）等垂直領域適配——真實車艙有 SSE 語音增強前端；X-ASR 熱詞、n-gram LM、偽串流 partial 只用 greedy / beam search 改 C++（見 B15）。
 **2026-10-30**：第一階段全鏈路已完成（tag `v1`，commit `f6b11a8`），開始逐項處理下列問題。麥克風路徑直接使用 `StreamingPipeline`，對 pipeline 的改動（VAD 預先啟動、斷句）會自動套用到麥克風。
 
@@ -10,13 +10,12 @@
 
 ## 建議處理順序
 
-1. **B0** 麥克風真實端到端延遲（進行中）
-2. **B14** partial 穩定度指標（進行中；偽串流能否當預設的前提之一）
-3. 第二階段：Core ML（官方 INT8，不自行量化；onnxruntime CoreML EP 前哨進行中）、**B11** 模型體積
-4. 偽串流當預設的其餘前提：閒置時重量 RTF 與延遲、SenseVoice 商用書面確認（使用者處理）
-5. **B13** 公開前替換 macOS 系統語音產生的測試 fixture（要公開 repo 時才必要）
-6. 有空再做：B8 閒置重量執行緒、B10、B12、B15
-- 已告一段落：**B1** 首字延遲（推論端無可再降，主因是模型輸出延遲）、**B9** 結束判定（A2 + pause 150 為預設）、**B4 / B5** 連續多句集與 MFA 真實起點（車內噪音版在未合併分支）、**B7** 取消（不建立 FP32 參照）
+1. **B14** partial 穩定度指標（進行中；偽串流能否當預設的前提之一）
+2. 第二階段：Core ML（官方 INT8，不自行量化；onnxruntime CoreML EP 前哨進行中）、**B11** 模型體積
+3. 偽串流當預設的其餘前提：閒置時重量 RTF 與延遲、SenseVoice 商用書面確認（使用者處理）
+4. **B13** 公開前替換 macOS 系統語音產生的測試 fixture（要公開 repo 時才必要）
+5. 有空再做：B8 閒置重量執行緒、B10、B12、B15
+- 已告一段落：**B0** 麥克風真實延遲（軟體路徑已量測，2026-11-02，差距 < 25 ms；聲學 / 虛擬裝置回送需使用者同意，未做）、**B1** 首字延遲（推論端無可再降，主因是模型輸出延遲）、**B9** 結束判定（A2 + pause 150 為預設）、**B4 / B5** 連續多句集與 MFA 真實起點（車內噪音版在未合併分支）、**B7** 取消（不建立 FP32 參照）
 
 ---
 
@@ -27,6 +26,8 @@
 - **現況**：`scripts/demo_mic.py` 已完成（v1），能連續說多句並即時顯示 partial 與每句首字延遲。但所有正式延遲數字都是「模擬即時」，不含音訊驅動的緩衝延遲，也假設沒有其他程序搶 CPU；麥克風的牆鐘延遲沒有與模擬值正式對比過。
 - **做法**：用固定音訊經喇叭播放或虛擬音訊裝置（例如 BlackHole）回送到輸入，同一段音訊同時跑模擬與真實路徑，比較首字延遲分佈。
 - **完成標準**：模擬 vs 真實的首字延遲對比表，並說明差距來源（PortAudio 緩衝、排程抖動）。
+- **2026-11-02 已量測（軟體路徑，30 句；progress.md）**：`scripts/mic_latency.py` 以 sim / thread（真實時鐘 + 與 demo_mic 相同的 queue 結構）/ portaudio（真的開輸入裝置、丟棄麥克風聲音改送檔案）三條路徑對比。block 160（demo_mic 預設）時真實 − 模擬：首字 −1 ~ +9 ms、完整結果 −13 ~ +21 ms（兩次）；系統性部分只有 PortAudio 交付延遲 4 ms（約 block 的 1/3，1024 時 22 ms），其餘是負載下的計算波動；排程與 queue 可忽略。結論：模擬即時的數字可代表麥克風路徑（ADC 時間戳之後）。
+- **未做（需使用者同意）**：聲學回送 / 虛擬音訊裝置，驗證 ADC 時間戳之前的硬體延遲（PortAudio 回報 263 ms vs 時間戳推得 14 ms，差距未解）。使用者已要求不再開啟麥克風；portaudio 路徑改為預設不跑、需 `--allow-mic`。
 
 ### B1　首字延遲約 1 秒（P0）
 
