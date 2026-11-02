@@ -743,13 +743,13 @@ def main() -> int:
 
     # pause 0（不用暫定結果）時 provisional 沒有作用，統一記成 redecode 並去重
     # 沒有熱詞時 hotword_score 沒有作用，統一記成預設值並去重
-    from src.asr import DecodeOptions
+    from src.asr import DecodeOptions, default_threads
 
     default_score = DecodeOptions().hotword_score
     combos = dict.fromkeys(
         (
             model,
-            threads,
+            threads_arg or default_threads(model),
             chunk,
             sil,
             pre,
@@ -759,7 +759,7 @@ def main() -> int:
             beam,
             score if args.hotwords else default_score,
         )
-        for model, threads, chunk, sil, pre, bp, pause, mode, beam, score in itertools.product(
+        for model, threads_arg, chunk, sil, pre, bp, pause, mode, beam, score in itertools.product(
             args.model,
             args.threads,
             args.chunk_ms,

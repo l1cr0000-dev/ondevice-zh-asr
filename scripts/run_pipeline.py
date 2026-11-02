@@ -24,7 +24,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.asr import SAMPLE_RATE, DecodeOptions, load_asr
+from src.asr import SAMPLE_RATE, DecodeOptions, default_threads, load_asr
 from src.cli import add_decode_args, add_pipeline_args, pipeline_config_from_args, read_hotwords
 from src.pipeline import Utterance, transcribe
 from src.vad import VAD_MODEL_NAME, SileroVadModel, load_wav
@@ -82,6 +82,7 @@ def main() -> int:
     try:
         config = pipeline_config_from_args(args)
         audio = load_wav(args.wav)
+        args.threads = args.threads or default_threads(args.model)
         vad_model = SileroVadModel(num_threads=args.threads)
         decode = DecodeOptions(
             beam=args.beam, hotwords=read_hotwords(args.hotwords), hotword_score=args.hotword_score

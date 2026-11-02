@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("wav", nargs="?", type=Path, default=DEFAULT_WAV, help="16 kHz wav 檔")
     p.add_argument("--model", default=DEFAULT_MODEL, choices=available_models(), help="ASR 模型")
-    p.add_argument("--threads", type=positive_int, default=1, help="推論執行緒數")
+    p.add_argument("--threads", type=positive_int, help="推論執行緒數；不給時用模型預設")
     p.add_argument("--chunk-ms", type=positive_int, default=10, help="每次送入的音訊長度")
     p.add_argument("--fast", action="store_true", help="不依音訊時長節奏等待，盡快送完所有 chunk")
     return p.parse_args()

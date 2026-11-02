@@ -28,7 +28,7 @@ def _parser(sweep: bool = False) -> argparse.ArgumentParser:
 def test_defaults_match_pipeline_config() -> None:
     args = _parser().parse_args([])
     assert pipeline_config_from_args(args) == PipelineConfig()
-    assert args.threads == 1 and args.chunk_ms == 10
+    assert args.threads is None and args.chunk_ms == 10  # None = 模型預設（src.asr.default_threads）
 
 
 def test_single_threshold_fallback() -> None:

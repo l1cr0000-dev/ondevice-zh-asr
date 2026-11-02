@@ -52,13 +52,15 @@ __all__ = [
     "TransducerFiles",
     "ZipformerOrtAsr",
     "available_models",
+    "default_threads",
     "load_asr",
 ]
 
 # 2026-11-02 使用者決定改為 SenseVoice 偽串流（docs/progress.md「決定：預設改為 SenseVoice 偽串流」）：
 # 首字約 0.45 s（X-ASR 約 1 s）、CER 持平或略好、支援熱詞；代價是 partial 跳動較多、結果慢數十 ms、
 # 記憶體較大、授權依據較弱。X-ASR 保留為 `x-asr-480ms-int8-ort`。
-DEFAULT_MODEL = "sensevoice-small-int8-ort-p480-960-max3"
+# 2026-11-02 再改為語言固定 zh 的版本：第一個 partial 的英文碎片 15–32% → 0–1.5%，CER 不變。
+DEFAULT_MODEL = "sensevoice-small-int8-ort-p480-960-max3-zh"
 
 # sherpa-onnx transducer 模型：名稱 → (模型檔, 句尾補零秒數)。也供 scripts/probe_memory.py 直接載入。
 TRANSDUCER_SPECS: dict[str, tuple[TransducerFiles, float]] = {
@@ -204,15 +206,29 @@ def available_models() -> list[str]:
     return sorted(_REGISTRY)
 
 
+def default_threads(name: str) -> int:
+    """模型的預設推論執行緒數。
+
+    SenseVoice onnxruntime 版每次整段推論，2 執行緒結果逐句不變、說完 → 完整結果快 30–50 ms
+    （docs/progress.md 2026-11-02「SenseVoice 偽串流的執行緒數」）；其餘維持 1
+    （X-ASR 多執行緒沒有收益且會改變結果，B8）。
+    """
+    return 2 if name.startswith("sensevoice-small-int8-ort") else 1
+
+
 def load_asr(
     name: str = DEFAULT_MODEL,
-    num_threads: int = 1,
+    num_threads: int | None = None,
     blank_penalty: float = 0.0,
     decode: DecodeOptions | None = None,
 ) -> StreamingAsr:
-    """`blank_penalty` 是 `DecodeOptions.blank_penalty` 的簡寫（給了 `decode` 時以 `decode` 為準）。"""
+    """`num_threads` 不給時用 `default_threads(name)`。
+
+    `blank_penalty` 是 `DecodeOptions.blank_penalty` 的簡寫（給了 `decode` 時以 `decode` 為準）。
+    """
     try:
         factory = _REGISTRY[name]
     except KeyError:
         raise ValueError(f"未知模型 {name!r}，可用：{', '.join(available_models())}") from None
-    return factory(num_threads, decode or DecodeOptions(blank_penalty=blank_penalty))
+    threads = num_threads or default_threads(name)
+    return factory(threads, decode or DecodeOptions(blank_penalty=blank_penalty))

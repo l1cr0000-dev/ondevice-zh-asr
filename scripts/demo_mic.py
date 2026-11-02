@@ -43,7 +43,7 @@ import numpy.typing as npt
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from src.asr import SAMPLE_RATE, load_asr
+from src.asr import SAMPLE_RATE, default_threads, load_asr
 from src.cli import add_pipeline_args, char_width, pipeline_config_from_args
 from src.pipeline import PipelineEvent, StreamingPipeline
 from src.vad import SileroVadModel
@@ -193,6 +193,7 @@ def main() -> int:
     try:
         sd.check_input_settings(device=device, channels=1, dtype="float32", samplerate=SAMPLE_RATE)
         config = pipeline_config_from_args(args)
+        args.threads = args.threads or default_threads(args.model)
         vad_model = SileroVadModel(num_threads=args.threads)
         asr = load_asr(args.model, num_threads=args.threads)
     except (ValueError, FileNotFoundError, sd.PortAudioError) as e:

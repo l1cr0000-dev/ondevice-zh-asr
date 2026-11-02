@@ -15,6 +15,7 @@ import numpy.typing as npt
 import pytest
 
 from src.asr import (
+    DEFAULT_MODEL,
     SAMPLE_RATE,
     AsrStream,
     PartialSchedule,
@@ -22,6 +23,7 @@ from src.asr import (
     SenseVoiceOrtAsr,
     StreamingAsr,
     available_models,
+    default_threads,
     load_asr,
 )
 from src.asr.sense_voice import SenseVoiceStream
@@ -427,3 +429,11 @@ def test_sense_voice_zh_keeps_english_words() -> None:
     head = zh.create_stream()
     head.accept_waveform(load_wav(X_ASR_TEST_WAVS / "3.wav")[: int(0.48 * SAMPLE_RATE)])
     assert not head.finalize().isascii()
+
+
+def test_default_threads_per_model() -> None:
+    # SenseVoice onnxruntime 版預設 2 執行緒（結果不變、較快），其餘維持 1（X-ASR 多執行緒無收益）
+    assert default_threads(DEFAULT_MODEL) == 2
+    assert default_threads("sensevoice-small-int8-ort") == 2
+    assert default_threads("x-asr-480ms-int8-ort") == 1
+    assert default_threads("sensevoice-small-int8") == 1  # sherpa-onnx 版未量測，維持 1

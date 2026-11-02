@@ -37,7 +37,12 @@ def add_pipeline_args(p: argparse.ArgumentParser, sweep: bool = False) -> None:
         return {"nargs": "+", "default": [default]} if sweep else {"default": default}
 
     p.add_argument("--model", choices=available_models(), help="ASR 模型", **multi(DEFAULT_MODEL))
-    p.add_argument("--threads", type=positive_int, help="VAD / ASR 推論執行緒數", **multi(1))
+    p.add_argument(
+        "--threads",
+        type=positive_int,
+        help="VAD / ASR 推論執行緒數；不給時用模型預設（SenseVoice onnxruntime 版 2，其餘 1）",
+        **multi(None),
+    )
     p.add_argument("--chunk-ms", type=positive_int, help="每次送入的音訊長度", **multi(10))
     p.add_argument(
         "--pre-roll-ms",
