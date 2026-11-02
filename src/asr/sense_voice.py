@@ -203,7 +203,6 @@ class SenseVoiceAsr(_WholeUtteranceAsr):
         return str(stream.result.text)
 
 
-
 class SenseVoiceDecoder:
     """SenseVoice 模型輸出 (T, vocab) → 文字。beam ≤ 1 且沒有熱詞時是 CTC greedy，否則 prefix beam search。
 
@@ -262,7 +261,14 @@ class SenseVoiceOrtAsr(_WholeUtteranceAsr):
       prefix beam search。熱詞對不上 tokens.txt 的會略過並列在 `decoder.skipped_hotwords`。
     """
 
-    def __init__(self, config: SenseVoiceConfig | None = None, models_dir: Path = MODELS_DIR):
+    def __init__(
+        self,
+        config: SenseVoiceConfig | None = None,
+        models_dir: Path = MODELS_DIR,
+        sess_options: Any = None,
+    ):
+        """`sess_options`：自訂的 `ort.SessionOptions`（量測 session 選項用，見
+        scripts/bench_sv_compute.py）；給定時 `config.num_threads` 不使用。"""
         import kaldi_native_fbank as knf  # type: ignore[import-untyped]
         import onnxruntime as ort  # type: ignore[import-untyped]
 
@@ -275,9 +281,11 @@ class SenseVoiceOrtAsr(_WholeUtteranceAsr):
                 "找不到模型檔，請先執行 bash scripts/download_models.sh：\n  "
                 + "\n  ".join(missing)
             )
-        opts: Any = ort.SessionOptions()
-        opts.intra_op_num_threads = self.config.num_threads
-        opts.inter_op_num_threads = 1
+        opts: Any = sess_options
+        if opts is None:
+            opts = ort.SessionOptions()
+            opts.intra_op_num_threads = self.config.num_threads
+            opts.inter_op_num_threads = 1
         # 以檔案路徑建立 session（不先讀進記憶體），見模組說明
         self._session: Any = ort.InferenceSession(
             str(self._paths["model"]), opts, providers=["CPUExecutionProvider"]

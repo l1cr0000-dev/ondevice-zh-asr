@@ -186,3 +186,22 @@ def test_hotwords_rejected_by_other_backends(name: str) -> None:
         load_asr(name, decode=DecodeOptions(hotwords=("北京",)))
     with pytest.raises(ValueError, match="熱詞"):
         load_asr(name, decode=DecodeOptions(beam=4))
+
+
+def test_sense_voice_custom_sess_options(sense_voice_ort: SenseVoiceOrtAsr) -> None:
+    # 自訂 session 選項（關 spinning）會用在 session 上；單執行緒時結果與預設相同
+    import onnxruntime as ort  # type: ignore[import-untyped]
+
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 1
+    opts.inter_op_num_threads = 1
+    opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    asr = SenseVoiceOrtAsr(sess_options=opts)
+    assert (
+        asr._session.get_session_options().get_session_config_entry(
+            "session.intra_op.allow_spinning"
+        )
+        == "0"
+    )
+    audio = load_wav(TEST_WAVS / "0.wav")
+    assert asr._recognize_audio(audio) == sense_voice_ort._recognize_audio(audio)
