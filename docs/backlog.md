@@ -2,7 +2,7 @@
 
 持續更新的清單：已知問題、要做的優化、優先順序。做完的項目移到最下方「已完成」，並在 [progress.md](progress.md) 寫實驗紀錄。數字出自 2026-10-30 的 AISHELL-1 掃描（commit `f576d57`），細節見 progress.md。
 
-**目前狀態（2026-11-02）**：預設為 X-ASR 480 ms INT8 + onnxruntime 1.31.1 直接推論（峰值 RSS 541 → 353 MB）、結束判定 A2（pause 150 / min_silence 1000）、greedy search 批次 joiner；SenseVoice 支援熱詞（CTC prefix beam search，選項）。B1 推論端已到頭，B9 方案定案，B8 CPU 調校無可再調。未合併的實驗分支（small CTC、偽串流降計算量、B4 車內噪音、B11 評測 RSS、B7 取消 FP32）見 progress.md「未合併分支的實驗紀錄」。進行中（2026-11-02 分派）：partial 穩定度指標（B14）、onnxruntime CoreML EP 前哨（第二階段）。
+**目前狀態（2026-11-02）**：預設為 X-ASR 480 ms INT8 + onnxruntime 1.31.1 直接推論（峰值 RSS 541 → 353 MB）、結束判定 A2（pause 150 / min_silence 1000）、greedy search 批次 joiner；SenseVoice 支援熱詞（CTC prefix beam search，選項）。B1 推論端已到頭，B9 方案定案，B8 CPU 調校無可再調。未合併的實驗分支（small CTC、偽串流降計算量、B4 車內噪音、B11 評測 RSS、B7 取消 FP32）見 progress.md「未合併分支的實驗紀錄」。2026-11-02 已完成：B0 麥克風真實延遲（模擬值可代表真實路徑）、B14 partial 穩定度（偽串流跳動是 X-ASR 的 2–6 倍）、B16 CoreML EP 前哨（官方 INT8 不加速）。
 **暫緩（使用者決定，2026-11-01）**：噪音測試加強（SNR 定義）、跨領域評測集（B6a）等垂直領域適配——真實車艙有 SSE 語音增強前端；X-ASR 熱詞、n-gram LM、偽串流 partial 只用 greedy / beam search 改 C++（見 B15）。
 **2026-10-30**：第一階段全鏈路已完成（tag `v1`，commit `f6b11a8`），開始逐項處理下列問題。麥克風路徑直接使用 `StreamingPipeline`，對 pipeline 的改動（VAD 預先啟動、斷句）會自動套用到麥克風。
 
@@ -10,8 +10,8 @@
 
 ## 建議處理順序
 
-1. **B14** partial 穩定度指標（進行中；偽串流能否當預設的前提之一）
-2. 第二階段：Core ML（官方 INT8，不自行量化；onnxruntime CoreML EP 前哨進行中）、**B11** 模型體積
+1. 預設模型的選擇：SenseVoice 偽串流 vs X-ASR（取決於畫面是否即時顯示 partial；B14 的 hold 顯示規則可讓 X-ASR 的修正幾乎歸零，尚未實作）
+2. 第二階段：**B16** Core ML（官方 INT8，不自行量化；ORT CoreML EP 不加速，下一步改寫量化矩陣乘法，需下載 `onnx`）、**B11** 模型體積
 3. 偽串流當預設的其餘前提：閒置時重量 RTF 與延遲、SenseVoice 商用書面確認（使用者處理）
 4. **B13** 公開前替換 macOS 系統語音產生的測試 fixture（要公開 repo 時才必要）
 5. 有空再做：B8 閒置重量執行緒、B10、B12、B15
@@ -125,7 +125,7 @@
 - **2026-11-01 已處理**：(1) X-ASR / SenseVoice 改用 onnxruntime 1.31.1 直接推論並設為預設（`x-asr-480ms-int8-ort`），200 句峰值 RSS 541 → 353 MB，結果與 sherpa-onnx 版逐句相同；(2) 評測峰值 RSS 隨句數上升已查明是推論暖機（malloc 碎片、程式碼分頁），改以最長 20 句暖機（分支 `feat/b11-eval-rss`，未合併）。**剩下**：模型體積 163.6 MB，留到第二階段 Core ML；輕量備選 small CTC（27 MB、RSS 約 183 MB，CER 約 2 倍）在分支 `feat/light-ctc`。
 - **原做法**：(1) 等 sherpa-onnx 改用 ORT ≥ 1.30，或自行以較新的 ORT 編譯 sherpa-onnx，再用 `probe_memory.py` 對比；iOS 端以 phys_footprint（jetsam 依據）而非 RSS 為準；(2) 在 worker 中每 N 句取樣 RSS，找出評測端的增長來源並修正，讓峰值 RSS 與句數無關；(3) 第二階段量化與 Core ML 轉換時一併對比記憶體與體積。
 
-### B14　Core ML 加速 encoder（P1，第二階段）
+### B16　Core ML 加速 encoder（P1，第二階段）
 
 - **現況（2026-11-02，progress.md）**：onnxruntime 1.31.1 內建的 CoreML EP 跑官方 INT8 的 X-ASR 480 ms，所有 compute units（CPUOnly / CPUAndGPU / CPUAndNeuralEngine / ALL）× 格式（MLProgram / NeuralNetwork）都比 CPU 慢 2–3.4 倍，載入多 3–20 s（編譯 Core ML 模型），CER 無顯著變化。原因：Core ML 不支援 ONNX 動態量化的 `DynamicQuantizeLinear` / `MatMulInteger`，encoder 被切成 415 段，每段往返約 0.1 ms。可用 `x-asr-480ms-int8-ort-coreml-{cpu,gpu,ane,all}` 與 `bench_asr_compute.py --ep` 重現。
 - **做法**：(A，建議先做) 用 `onnx` 把官方 INT8 encoder 的量化矩陣乘法改寫成以官方 INT8 權重反量化的浮點 `MatMul`，再接 CoreML EP，看 partition 數與 ANE 加速比（需下載 `onnx`，先問使用者）；(B) 若 A 有效，再從 PyTorch checkpoint（2.56 GB）經 coremltools 轉正式的 Core ML 模型給 iOS 用。
@@ -154,7 +154,8 @@
 ### B14　partial 穩定度沒有量（P1）
 
 - **現況**：只量 CER 與延遲，沒有量畫面上文字被修改的次數與字數。A2 的暫定結果約 36–40% 的句子先出半句再被修正；SenseVoice 偽串流每次 partial 整段重新辨識，可能整句跳動，是它當預設的前提之一。
-- **進行中（2026-11-02）**：分支 `feat/partial-stability`，定義修正率、被改掉的字數、前綴穩定時間，比較 X-ASR（A2）與偽串流。
+- **2026-11-02 已量（progress.md）**：`eval/stability.py`（修正率、被改字數、前綴穩定延遲）。X-ASR 的串流 partial 只追加，修正全部來自 A2 暫定結果「縮回再補回」，hold 顯示規則（由結果 JSON 模擬）可降到 0.1%、首字不變；SenseVoice 偽串流被改的字是 X-ASR 的 2–6 倍、字穩定延遲 P90 約 1 s，第一個 partial 14–32% 是英文碎片，local agreement 壓跳動會讓首字晚於 X-ASR。
+- **未做**：hold 顯示規則實作到 pipeline / demo。
 
 ### B15　熱詞與語言模型的後續（暫緩）
 
