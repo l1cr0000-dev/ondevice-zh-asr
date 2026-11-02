@@ -185,3 +185,50 @@ def summarize_stability(utterances: Sequence[dict[str, Any]]) -> dict[str, Any] 
             if k != "final"  # 最終結果不會被取代
         },
     }
+
+
+# ---------- 第一個 partial 的顯示規則（只改畫面要不要顯示，不改辨識結果） ----------
+
+
+@dataclass(frozen=True)
+class FirstPartialRule:
+    """句段在畫面上還沒有任何字時，partial 要滿足這個規則才顯示；一旦顯示過，之後的 partial 照常顯示。
+
+    偽串流第一次 partial 只看了零點幾秒的音訊，常是英文 / 數字碎片（「low」「jo」）或單一語氣詞
+    （「嗯」），顯示出來下一次就被整個換掉。暫定結果與最終結果不受規則影響，一律顯示。
+
+    - `min_cjk`：至少要有幾個中文（非 ASCII）token；0 = 不限。
+    - `drop_ascii`：正規化後全是 ASCII（英文詞 / 數字）就不顯示。
+    """
+
+    min_cjk: int = 0
+    drop_ascii: bool = False
+
+    def shows(self, text: str) -> bool:
+        tokens = tokenize(text)
+        if not tokens:
+            return False
+        if self.drop_ascii and all(t.isascii() for t in tokens):
+            return False
+        return sum(not t.isascii() for t in tokens) >= self.min_cjk
+
+    def describe(self) -> str:
+        parts = (["去 ASCII"] if self.drop_ascii else []) + (
+            [f"≥ {self.min_cjk} 中文字"] if self.min_cjk else []
+        )
+        return "、".join(parts) or "原樣"
+
+
+def apply_first_partial_rule(seg: dict[str, Any], rule: FirstPartialRule) -> dict[str, Any]:
+    """回傳套用顯示規則後的句段（淺複製）：丟掉第一個符合規則的 partial 之前的 partial。
+
+    `e2e_first_token_latency_s`（第一個非空 partial 的時刻）同步改成第一個顯示的 partial；
+    沒有任何 partial 顯示時為 None（畫面要等暫定結果 / 最終結果才有字）。
+    """
+    partials = seg.get("partials", [])
+    k = next((i for i, p in enumerate(partials) if rule.shows(p["text"])), len(partials))
+    out = dict(seg)
+    out["partials"] = partials[k:]
+    if "e2e_first_token_latency_s" in seg:
+        out["e2e_first_token_latency_s"] = partials[k]["emitted_s"] if k < len(partials) else None
+    return out

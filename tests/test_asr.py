@@ -18,6 +18,8 @@ from src.asr import (
     SAMPLE_RATE,
     AsrStream,
     PartialSchedule,
+    SenseVoiceConfig,
+    SenseVoiceOrtAsr,
     StreamingAsr,
     available_models,
     load_asr,
@@ -248,8 +250,6 @@ def test_sense_voice_ort_matches_sherpa(sense_voice: StreamingAsr, wav: str) -> 
 
 
 def test_sense_voice_ort_lfr_shape_and_edges() -> None:
-    from src.asr import SenseVoiceOrtAsr
-
     try:
         asr = load_asr("sensevoice-small-int8-ort", num_threads=1)
     except FileNotFoundError:
@@ -399,3 +399,31 @@ def test_sense_voice_compute_stats_count_every_decode() -> None:
     assert asr.compute_stats() == pytest.approx({"num_decodes": 3, "decoded_audio_s": 2.44})
     asr.reset_compute_stats()
     assert asr.compute_stats() == {"num_decodes": 0, "decoded_audio_s": 0.0}
+
+
+@pytest.mark.parametrize("ms", [320, 400, 480])
+def test_sense_voice_zh_models(ms: int) -> None:
+    # 語言固定 zh 的偽串流（docs/progress.md 2026-11-02「SenseVoice 語言固定 zh 與第一次 partial」）
+    try:
+        asr = load_asr(f"sensevoice-small-int8-ort-p{ms}-960-max3-zh", num_threads=1)
+    except FileNotFoundError:
+        pytest.skip("SenseVoice 未下載，請先執行 bash scripts/download_models.sh")
+    assert isinstance(asr, SenseVoiceOrtAsr)
+    assert asr.config.language == "zh"
+    assert asr.config.schedule == PartialSchedule(0.96, first_s=ms / 1000, max_s=3.0)
+    assert "language=zh" in asr.name
+
+
+def test_sense_voice_zh_keeps_english_words() -> None:
+    # 中英混合：固定 zh 不會把整句的英文詞認成中文；短前綴不再猜成英文碎片（auto 是「yah」）
+    try:
+        zh = SenseVoiceOrtAsr(SenseVoiceConfig(language="zh"))
+    except FileNotFoundError:
+        pytest.skip("SenseVoice 未下載，請先執行 bash scripts/download_models.sh")
+    if not X_ASR_TEST_WAVS.is_dir():
+        pytest.skip("x-asr-480ms-int8 未下載，請先執行 bash scripts/download_models.sh")
+    text = _transcribe(zh, X_ASR_TEST_WAVS / "0.wav")
+    assert "monday" in text and "tomorrow" in text
+    head = zh.create_stream()
+    head.accept_waveform(load_wav(X_ASR_TEST_WAVS / "3.wav")[: int(0.48 * SAMPLE_RATE)])
+    assert not head.finalize().isascii()
