@@ -2,20 +2,21 @@
 
 持續更新的清單：已知問題、要做的優化、優先順序。做完的項目移到最下方「已完成」，並在 [progress.md](progress.md) 寫實驗紀錄。數字出自 2026-10-30 的 AISHELL-1 掃描（commit `f576d57`），細節見 progress.md。
 
-**目前狀態（2026-10-31）**：斷句 / 尾字延遲的診斷完成（B3 已解決，B9 有數據，見 progress.md 與 [scoreboard.md](scoreboard.md)），下一步建 B4 連續多句評測集，再在其上比較結束判定方案。
+**目前狀態（2026-11-02）**：預設為 X-ASR 480 ms INT8 + onnxruntime 1.31.1 直接推論（峰值 RSS 541 → 353 MB）、結束判定 A2（pause 150 / min_silence 1000）、greedy search 批次 joiner；SenseVoice 支援熱詞（CTC prefix beam search，選項）。B1 推論端已到頭，B9 方案定案，B8 CPU 調校無可再調。未合併的實驗分支（small CTC、偽串流降計算量、B4 車內噪音、B11 評測 RSS、B7 取消 FP32）見 progress.md「未合併分支的實驗紀錄」。進行中（2026-11-02 分派）：B0 麥克風真實延遲、partial 穩定度指標（B14）、onnxruntime CoreML EP 前哨（第二階段）。
+**暫緩（使用者決定，2026-11-01）**：噪音測試加強（SNR 定義）、跨領域評測集（B6a）等垂直領域適配——真實車艙有 SSE 語音增強前端；X-ASR 熱詞、n-gram LM、偽串流 partial 只用 greedy / beam search 改 C++（見 B15）。
 **2026-10-30**：第一階段全鏈路已完成（tag `v1`，commit `f6b11a8`），開始逐項處理下列問題。麥克風路徑直接使用 `StreamingPipeline`，對 pipeline 的改動（VAD 預先啟動、斷句）會自動套用到麥克風。
 
 優先級：**P0** 影響核心目標或結論的可信度｜**P1** 影響品質，該做｜**P2** 有空再做
 
 ## 建議處理順序
 
-1. **B13** 公開前替換 macOS 系統語音產生的測試 fixture（要公開 repo 時才必要）
-2. **B4 + B5** 評測可信度：合成連續多句音訊集、與 VAD 無關的首字起點（之後所有斷句優化都靠它驗證；B3 已於 2026-10-31 以句尾補靜音解決）
-3. **B1** 首字延遲：160 ms 對比與字級拆解已完成（2026-10-31，主因是模型輸出延遲）；blank_penalty 掃描完成，預設維持 penalty 0（B2 不實作）。推論端已無明顯可降空間，延遲線在第一階段告一段落
-4. **B9** 結束判定方案（2026-10-31 診斷完成，在 B4 上比較方案，結果記在 scoreboard.md）
-5. **B0** 麥克風真實端到端延遲
-6. 第二階段前：**B7** FP32 參照、**B11** 記憶體與模型體積
-7. 有空再做：B8、B10、B12
+1. **B0** 麥克風真實端到端延遲（進行中）
+2. **B14** partial 穩定度指標（進行中；偽串流能否當預設的前提之一）
+3. 第二階段：Core ML（官方 INT8，不自行量化；onnxruntime CoreML EP 前哨進行中）、**B11** 模型體積
+4. 偽串流當預設的其餘前提：閒置時重量 RTF 與延遲、SenseVoice 商用書面確認（使用者處理）
+5. **B13** 公開前替換 macOS 系統語音產生的測試 fixture（要公開 repo 時才必要）
+6. 有空再做：B8 閒置重量執行緒、B10、B12、B15
+- 已告一段落：**B1** 首字延遲（推論端無可再降，主因是模型輸出延遲）、**B9** 結束判定（A2 + pause 150 為預設）、**B4 / B5** 連續多句集與 MFA 真實起點（車內噪音版在未合併分支）、**B7** 取消（不建立 FP32 參照）
 
 ---
 
@@ -57,6 +58,7 @@
 - **做法**：由 AISHELL 句子合成長音訊：多句以不同長度的靜音（例如 0.2–2 s）串接、句尾留足靜音，再以不同 SNR 混入噪音（需選一個授權清楚的噪音集）。句子位置由合成過程精確已知，同時解決 B3 與 B5。
 - **完成標準**：`prepare_eval_data.py` 可產生長音訊集，`run_eval.py` 在上面報告句間切分正確率、誤觸發數、真實尾字延遲。
 - **部分完成（2026-10-31）**：`scripts/prepare_continuous_data.py` 由 300 句對齊集合成連續多句集（77 條，句間停頓 0.2–2 s 分檔），`run_eval.py` 報告句間切開率、句中誤切、每句真實尾字 / 首字延遲（scoreboard.md）。**未做**：噪音混入（需選授權清楚的噪音集）、誤觸發數、更大規模（目前只有 300 句，受 MFA 對齊集限制）。
+- **2026-11-01 車內噪音版（分支 `feat/b4-noise`，未合併）**：DEMAND TCAR 20 / 10 / 5 / 0 / −5 dB 與誤觸發指標；誤觸發全為 0、CER 與乾淨集無顯著差。TCAR 能量 98.7% 在 100 Hz 以下，寬頻 SNR 高估干擾。**暫緩**：真實車艙有 SSE 前端，SNR 定義與更難的噪音測試先不做。
 
 ### B5　首字延遲的起點來自 VAD 本身（P0）
 
@@ -65,12 +67,14 @@
 - **部分完成（2026-10-31）**：端到端首字延遲（前補 1 秒靜音）與 VAD 無關但只適合相對比較；300 句 MFA 字級對齊集（`scripts/prepare_alignment.py`）提供真實首字起點，VAD 起點平均早 26 ms（P90 0–2 ms）。對齊誤差待人工抽查；完整版仍待 B4 的合成長音訊集。
 - **完成標準**：docs/eval.md 的定義更新，並報告兩種起點的差距分佈。
 
-### B6a　評測集與任何模型訓練資料都不重疊（P1，原 B6 的後續）
+### B6a　評測集與任何模型訓練資料都不重疊（暫緩，原 P1；2026-11-01 使用者決定垂直領域 / 跨領域評測先不做）
 
 - **現況**：B6 查證結果（[models.md](models.md)）：X-ASR 是否用過 AISHELL-1 train / test **未知**，官方只說「約 100 萬小時開源及收集語音」。AISHELL-1 上的 X-ASR CER 無法當作泛化能力。
 - **做法**：B4 的合成長音訊集改用自錄句子（或其他確定不在訓練資料中的語料）為來源，作為「保證跨領域」的評測集。X-ASR 技術報告（README 標示 Coming Soon）公布後再查一次訓練資料清單。
 
-### B7　第一階段缺少 FP32 基準（P1）
+### B7　第一階段缺少 FP32 基準（取消，2026-11-01）
+
+- **取消**：實際部署不用全精度，不下載、不評測 FP32；第二階段改為以官方 INT8 模型為準做 Core ML 對比，不自行量化。文件改動（README 路線圖、CLAUDE.md 階段表、X-ASR 參數量 153.4M）在分支 `feat/b7-no-fp32`，未合併。以下為原紀錄。
 
 - **現況**：CLAUDE.md 規定第一階段以 FP32 為基準，但 X-ASR 用的是官方 INT8 版（FP32 encoder 566 MB）。第二階段做量化對比時缺少 FP32 參照。
 - **做法**：下載 FP32 版跑一次評測，只用來當參照，不必當預設。
@@ -78,7 +82,7 @@
 ### B8　其他評測缺口（P2）
 
 - ~~多執行緒 RTF（CLAUDE.md 要求另報）~~ **2026-11-01 已量**（progress.md「X-ASR onnxruntime 後端調校」，200 / 300 句）：`x-asr-480ms-int8-ort` 2 / 4 執行緒沒有加速（負載下 RTF +21% / +55%，關 spinning 後 2 執行緒持平），停頓時的 finalize 與恢復時的重新解碼變慢，且會改變 1–5% 句子的結果；預設維持單執行緒。ORT session 選項（圖最佳化等級、arena、mem pattern、prepacking、denormal）都沒有收益。**未做**：量測時有其他程序佔用 CPU，閒置時重量執行緒 1 / 2 / 4 的 RTF。
-- X-ASR 參數量（可用 `onnx` 套件統計 initializer）。
+- ~~X-ASR 參數量~~ 153.4M（97% INT8）、zh-14M 13.8M（2026-11-01，記在分支 `feat/b7-no-fp32`）。
 - 正式評測集已改為 3000 句（CER 信賴區間以句重抽約 ±0.27 個百分點，X-ASR）。VAD / pre-roll 掃描仍是 200 句子集上的結果，之後的參數選擇要在 3000 句集上重做。
 - 評測音訊來自第三方鏡像（`shenyunhang/AISHELL-1`），無法對官方 checksum 驗證。
 - 只在一台 Apple M5 Mac、CPU 上驗證過；其他 Apple Silicon 機型的數字未知。
@@ -95,7 +99,7 @@
   - VAD 結束事件時 partial 只有 1.4–3% 的句子已完整（平均少 1.65 字）；不 finalize、只送靜音要約 1.1 s 才完整。「partial 不再變化就提早結束」無法直接降低尾字延遲。
   - 句中停頓中位數 320 ms，自由說話的句間停頓（288、448 ms，僅 5 個樣本）落在同一範圍。AISHELL 量不到合併的代價，方案比較需要 B4。
 - **2026-10-31 方案 A（暫定結果 + 長門檻定稿，`--pause-ms`，預設關閉）**：pause 200 / min_silence 1000 時 CER 4.11 → 3.70%（最終文字與 min_silence 1000 相同），單句真實尾字的結果延遲 580 → 409 ms，連續集 0.3 / 0.5 s 停頓不再要等數秒。代價：35% 的句子先出現半句的暫定結果再被修正；重新解碼 148–239 ms、RTF 約 2–3 倍。**2026-11-01 方案 A2**（`--provisional finalize`）：單句結果延遲 299 ms（P90 366）、RTF 約為 A 的一半，但最終文字偶爾漏句尾的字，CER 3.75%（相對 A +0.05 個百分點，顯著；相對單一門檻 500 ms −0.36）。**2026-11-01 改為預設**（`PipelineConfig()` 與各腳本；`--min-silence-ms 500 --pause-ms 0` 退回舊設定），見 progress.md。
-- **2026-11-01 短停頓**（progress.md、scoreboard.md「B9 短停頓」）：A2 的 pause 200 實際要 224 ms（32 ms frame 進位），0.2 s 句間停頓有 39% 抓不到。pause 150（160 ms）讓連續集 0.2 s 停頓後的結果延遲 1.3 s → 0.23 s、其餘句子快約 60 ms；代價是半句暫定結果的句子 36% → 40%、解碼量 +3.5–8%，CER 不變。調 neg_threshold 幾乎沒幫助。`--pause-ms 150` 可用，是否改預設待決定（建議先在閒置時重量 RTF）。
+- **2026-11-01 短停頓**（progress.md、scoreboard.md「B9 短停頓」）：A2 的 pause 200 實際要 224 ms（32 ms frame 進位），0.2 s 句間停頓有 39% 抓不到。pause 150（160 ms）讓連續集 0.2 s 停頓後的結果延遲 1.3 s → 0.23 s、其餘句子快約 60 ms；代價是半句暫定結果的句子 36% → 40%、解碼量 +3.5–8%，CER 不變。調 neg_threshold 幾乎沒幫助。**2026-11-01 已改為預設**（progress.md「決定：A2 的 pause 預設 200 → 150」）。
 - **原做法**：把「VAD 決定送不送音訊」與「何時輸出最終結果」分開：VAD 只過濾長靜音，斷句改由 ASR 端的 endpoint 規則判斷（結合已解碼內容與尾端靜音，sherpa-onnx 有內建規則）。也可先試 `threshold` / `neg_threshold`。
 - **完成標準**：在 B4 的長音訊集上，切段正確率與 CER 都不低於目前設定。
 
@@ -116,7 +120,8 @@
   - 同樣三個檔案直接用 onnxruntime 1.31.1 載入只增加約 245 MB。**已查明**（vmmap，見 progress.md）：多出的約 190 MB 不是重複的權重，存活配置量兩邊相同（219 vs 205 MB），差別是 sherpa-onnx 2.0.1 內附的 ORT 1.28.2 在載入時留下約 183 MB 已釋放但未歸還的 malloc 碎片。onnxruntime 1.28.0 / 1.29.0 直接載入可重現（碎片 192 / 188 MB），1.30.0 起降到約 34 MB。sherpa-onnx 2.0.1 已是 PyPI 最新版。
   - 評測時峰值 RSS 隨句數增加（X-ASR 200 句 531 MB → 3000 句 618 MB；zh-14M 252 → 333 MB），但單獨解碼 100 → 1000 句只增加 3 MB，增加的部分在評測 / pipeline 端，原因未查。這讓「峰值 RSS」指標混入了評測框架本身，違背 CLAUDE.md 的量測原則。
 - **2026-11-01 SenseVoice**（`scripts/probe_footprint.py`，progress.md）：經 sherpa-onnx 載入後 footprint 850 MB（X-ASR 270），其中約 500 MB 是 ORT 1.28 的載入開銷；同一檔案用 ORT 1.31.1 直接載入只要 +308 MB。改用 ORT ≥ 1.30 後 SenseVoice 與 X-ASR 的差距估計從約 580 MB 縮到約 60 MB（未含推論，推論時約 +3 MB / 秒音訊）。
-- **做法**：(1) 等 sherpa-onnx 改用 ORT ≥ 1.30，或自行以較新的 ORT 編譯 sherpa-onnx，再用 `probe_memory.py` 對比；iOS 端以 phys_footprint（jetsam 依據）而非 RSS 為準；(2) 在 worker 中每 N 句取樣 RSS，找出評測端的增長來源並修正，讓峰值 RSS 與句數無關；(3) 第二階段量化與 Core ML 轉換時一併對比記憶體與體積。
+- **2026-11-01 已處理**：(1) X-ASR / SenseVoice 改用 onnxruntime 1.31.1 直接推論並設為預設（`x-asr-480ms-int8-ort`），200 句峰值 RSS 541 → 353 MB，結果與 sherpa-onnx 版逐句相同；(2) 評測峰值 RSS 隨句數上升已查明是推論暖機（malloc 碎片、程式碼分頁），改以最長 20 句暖機（分支 `feat/b11-eval-rss`，未合併）。**剩下**：模型體積 163.6 MB，留到第二階段 Core ML；輕量備選 small CTC（27 MB、RSS 約 183 MB，CER 約 2 倍）在分支 `feat/light-ctc`。
+- **原做法**：(1) 等 sherpa-onnx 改用 ORT ≥ 1.30，或自行以較新的 ORT 編譯 sherpa-onnx，再用 `probe_memory.py` 對比；iOS 端以 phys_footprint（jetsam 依據）而非 RSS 為準；(2) 在 worker 中每 N 句取樣 RSS，找出評測端的增長來源並修正，讓峰值 RSS 與句數無關；(3) 第二階段量化與 Core ML 轉換時一併對比記憶體與體積。
 
 ---
 
@@ -136,6 +141,24 @@
 
 ---
 
+## 輸出品質與擴充
+
+### B14　partial 穩定度沒有量（P1）
+
+- **現況**：只量 CER 與延遲，沒有量畫面上文字被修改的次數與字數。A2 的暫定結果約 36–40% 的句子先出半句再被修正；SenseVoice 偽串流每次 partial 整段重新辨識，可能整句跳動，是它當預設的前提之一。
+- **進行中（2026-11-02）**：分支 `feat/partial-stability`，定義修正率、被改掉的字數、前綴穩定時間，比較 X-ASR（A2）與偽串流。
+
+### B15　熱詞與語言模型的後續（暫緩）
+
+- **已做（2026-11-01）**：SenseVoice 熱詞，`src/asr/ctc_decode.py`（CTC prefix beam search + Aho-Corasick 加分），beam 8、score 1.5–2：300 句熱詞句 CER 6.24 → 3.98%（顯著），非熱詞句 0 句改變，每句解碼 +5.6 ms（模型計算量的約 4.5%）。`HotwordGraph` 與模型無關，CTC beam search 可直接用於其他 CTC 模型。
+- **暫緩（使用者決定）**：
+  - X-ASR 熱詞：greedy 換 modified beam search，`HotwordGraph` 可重用。
+  - 字級 n-gram LM shallow fusion（接進同一個 beam search；語料不能與評測集重疊）；WeNet 式 TLG 搜索圖成本高，需要詞級 LM 時再考慮。
+  - 偽串流降解碼開銷：partial 只用 greedy、暫定 / 最終結果才用 beam + 熱詞；beam search 改寫成 C++ / Rust。目前熱詞約 +5%，LM 估計約 +10%，尚不需要。
+- small CTC（分支 `feat/light-ctc`）用熱詞時，熱詞要經它的 bbpe 模型切 token，`tokenize_hotword` 不適用。
+
+---
+
 ## 已完成
 
 - 2026-10-30　VAD `min_silence_ms` 100 → 500、pre-roll 維持 100（AISHELL-1 掃描，見 progress.md）。
@@ -144,3 +167,8 @@
 - 2026-10-30　**B6** X-ASR / zh-14M 訓練資料與授權查證，寫進 [models.md](models.md) 與 `download_models.sh` 註解；公開散布的授權評估（可公開，唯一阻礙見 B13）。
 - 2026-10-30　正式評測集改為 AISHELL-1 test 隨機 3000 句，CER 報告 95% bootstrap 信賴區間（以句 / 以說話人）；200 句子集保留為 `--smoke`（原 B8 的一項）。
 - 2026-10-31　**B3** 尾字延遲量測修正：評測音訊後補 1.5 s 靜音（見 progress.md）。
+- 2026-11-01　**B9** 結束判定 A2（停頓 finalize 出暫定結果、恢復說話重新解碼、min_silence 1000 定稿）設為預設，pause 200 → 150。
+- 2026-11-01　**B11** X-ASR / SenseVoice 改用 onnxruntime 1.31.1 直接推論，`x-asr-480ms-int8-ort` 設為預設（峰值 RSS 541 → 353 MB）。
+- 2026-11-01　**B8** 執行緒數 / ORT session 選項掃描（無收益，維持單執行緒與預設選項）；greedy search 批次 joiner（結果逐句不變）。
+- 2026-11-01　SenseVoice 熱詞（CTC prefix beam search + Aho-Corasick 加分，選項，見 B15）。
+- 2026-11-01　**B7** 取消（不建立 FP32 參照，第二階段以官方 INT8 為準）。
