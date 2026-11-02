@@ -91,6 +91,19 @@ def test_bootstrap_ci_contains_estimate_and_is_reproducible() -> None:
     assert (lo, hi) == bootstrap_cer_ci(list(errors), list(refs), n_resamples=2000)
 
 
+def test_paired_bootstrap_cer_diff() -> None:
+    refs = [10] * 50
+    a = [1] * 50
+    diff, lo, hi = paired_bootstrap_cer_diff(a, a, refs, n_resamples=500)
+    assert diff == lo == hi == 0.0  # 逐句相同 → 差為 0，區間退化
+    b = [2] * 25 + [1] * 25  # B 在一半的句子多錯 1 字
+    diff, lo, hi = paired_bootstrap_cer_diff(a, b, refs, n_resamples=2000)
+    assert diff == pytest.approx(25 / 500)
+    assert 0 < lo < diff < hi
+    with pytest.raises(ValueError):
+        paired_bootstrap_cer_diff(a, b[:-1], refs)
+
+
 def test_bootstrap_ci_by_group_is_wider_when_groups_differ() -> None:
     # 10 位說話人，每人 30 句，CER 依說話人在 2%–20% 之間：同一說話人的句子高度相關
     refs, errors, groups = [], [], []
@@ -163,7 +176,9 @@ def test_run_config_name_marks_non_default_options() -> None:
     assert tail.name.endswith("_lead1000_tail1500_bp2")
     vad = RunConfig(**{**_cfg().__dict__, "vad_threshold": 0.6, "vad_neg_threshold": 0.5})
     assert vad.name.endswith("_lead1000_th0.6_neg0.5")
-    hw = RunConfig(**{**_cfg().__dict__, "beam": 4, "hotwords": "/x/cabin.txt", "hotword_score": 2.0})
+    hw = RunConfig(
+        **{**_cfg().__dict__, "beam": 4, "hotwords": "/x/cabin.txt", "hotword_score": 2.0}
+    )
     assert hw.name.endswith("_lead1000_beam4_hw-cabin2")
 
 
@@ -225,7 +240,9 @@ def test_run_eval_end_to_end(tmp_path: Path) -> None:
     assert m["segments_per_utterance"]["max"] == 1
     assert 0 < m["first_token_latency_ms"]["mean"] < 2000
     assert res["config"]["lead_silence_ms"] == 1000 and res["config"]["tail_silence_ms"] == 1500
-    assert result_file.stem.endswith("_lead1000_tail1500_pause150fin")  # 預設兩段門檻（A2，pause 150）
+    assert result_file.stem.endswith(
+        "_lead1000_tail1500_pause150fin"
+    )  # 預設兩段門檻（A2，pause 150）
     (utt,) = res["utterances"]
     assert utt["processed_s"] == pytest.approx(utt["duration_s"] + 2.5, abs=1e-3)
     # 句尾補足靜音後，最後一句由 VAD 靜音計時收尾：尾字延遲 ≈ min_silence（預設 1000 ms）
@@ -238,16 +255,3 @@ def test_run_eval_end_to_end(tmp_path: Path) -> None:
     assert m["memory_mb"]["peak_rss"] > m["memory_mb"]["baseline_rss"] > 0
     assert m["model_size_mb"] > 1
     assert set(res["config"]) >= {"model", "pre_roll_ms", "chunk_ms", "vad_min_silence_ms"}
-
-
-def test_paired_bootstrap_cer_diff() -> None:
-    refs = [10] * 50
-    a = [1] * 50
-    diff, lo, hi = paired_bootstrap_cer_diff(a, a, refs, n_resamples=500)
-    assert diff == lo == hi == 0.0  # 逐句相同 → 差為 0，區間退化
-    b = [2] * 25 + [1] * 25  # B 在一半的句子多錯 1 字
-    diff, lo, hi = paired_bootstrap_cer_diff(a, b, refs, n_resamples=2000)
-    assert diff == pytest.approx(25 / 500)
-    assert 0 < lo < diff < hi
-    with pytest.raises(ValueError):
-        paired_bootstrap_cer_diff(a, b[:-1], refs)

@@ -188,6 +188,10 @@ VAD 起點首字延遲的細節：
 - 前綴穩定延遲的起點是「第一次在這個位置出字」，不是語音時刻；一個字出現時就對、但後來被改掉又改回來，延遲從第一次出現算起。
 - 偽串流（SenseVoice 每隔一段整段重新辨識）的 partial 次數與間隔由排程決定，不同排程的「修正率」分母不同，比較時同時看被改掉的字數比例。
 
+### 重新辨識的計算量（`asr_compute`，非串流後端才有）
+
+偽串流（SenseVoice 定期整段重新辨識）的計算量隨句長成長，RTF 又會受同機其他工作影響。後端實作 `StreamingAsr.compute_stats()` 時，`metrics.asr_compute` 記錄暖機之後的整段辨識次數 `num_decodes`、辨識的音訊總長 `decoded_audio_s`，以及 `decoded_audio_ratio = decoded_audio_s / Σ processed_s`（與 RTF 同分母）。這個比例與機器負載無關，用來比較偽串流各設定的計算量；X-ASR 等串流後端為 `null`。
+
 ### 峰值記憶體
 
 子程序結束前的 `resource.getrusage(RUSAGE_SELF).ru_maxrss`（macOS 單位是 bytes，Linux 是 KB，程式已分別換算），單位 MB。包含 Python 直譯器與 numpy / onnxruntime 本身；另記錄模型載入前與載入後的 RSS，兩者之差約等於模型佔用。

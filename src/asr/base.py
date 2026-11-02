@@ -89,3 +89,13 @@ class StreamingAsr(ABC):
     def model_files(self) -> list[Path]:
         """推論所需的全部模型檔（含 tokens / 詞表），評測用來計算模型大小。"""
         return []
+
+    def compute_stats(self) -> dict[str, float] | None:
+        """與機器負載無關的計算量統計（自上次 `reset_compute_stats` 起、所有 stream 合計）。
+
+        例如非串流模型重新辨識的次數與音訊總長。後端不提供時回傳 None。
+        """
+        return None
+
+    def reset_compute_stats(self) -> None:
+        """清除 `compute_stats` 的累計（評測在暖機後呼叫）。"""

@@ -12,7 +12,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from src.asr.base import AsrStream, StreamingAsr
-from src.asr.sense_voice import SenseVoiceAsr, SenseVoiceConfig, SenseVoiceOrtAsr
+from src.asr.sense_voice import (
+    PartialSchedule,
+    SenseVoiceAsr,
+    SenseVoiceConfig,
+    SenseVoiceOrtAsr,
+)
 from src.asr.sherpa import (
     X_ASR_160MS,
     X_ASR_480MS,
@@ -37,6 +42,7 @@ __all__ = [
     "CoreMLOptions",
     "DecodeOptions",
     "OrtTransducerConfig",
+    "PartialSchedule",
     "SenseVoiceAsr",
     "SenseVoiceConfig",
     "SenseVoiceOrtAsr",
@@ -122,7 +128,12 @@ _COREML_UNITS: dict[str, CoreMLComputeUnits] = {
 }
 
 
-def _sense_voice(partial_every_s: float | None, ort: bool = False) -> _Factory:
+def _sense_voice(
+    partial_every_s: float | None,
+    ort: bool = False,
+    first_s: float | None = None,
+    max_s: float | None = None,
+) -> _Factory:
     def factory(threads: int, opts: DecodeOptions) -> StreamingAsr:
         if opts.blank_penalty:
             raise ValueError("blank_penalty 只適用於 transducer 模型")
@@ -131,6 +142,8 @@ def _sense_voice(partial_every_s: float | None, ort: bool = False) -> _Factory:
         config = SenseVoiceConfig(
             num_threads=threads,
             partial_every_s=partial_every_s,
+            partial_first_s=first_s,
+            partial_max_s=max_s,
             beam=opts.beam,
             hotwords=opts.hotwords,
             hotword_score=opts.hotword_score,
@@ -159,6 +172,17 @@ _REGISTRY: dict[str, _Factory] = {
     # 同一個模型直接用 onnxruntime（專案依賴的版本）推論，避開 sherpa-onnx 內附 ORT 1.28 的記憶體開銷
     "sensevoice-small-int8-ort": _sense_voice(None, ort=True),
     "sensevoice-small-int8-ort-p480": _sense_voice(0.48, ort=True),
+    # 偽串流的降計算量選項（docs/progress.md 2026-11-01 偽串流 vs 真串流）：
+    # 間隔加倍
+    "sensevoice-small-int8-ort-p960": _sense_voice(0.96, ort=True),
+    # 第一次 partial 仍在 0.48 s（首字不變），之後每 0.96 s 才更新
+    "sensevoice-small-int8-ort-p480-960": _sense_voice(0.96, ort=True, first_s=0.48),
+    # 每 0.48 s，但累積超過 3 s 就不再重新辨識（車艙指令多在 3 s 內；長句段只等暫定結果 / 定稿）
+    "sensevoice-small-int8-ort-p480-max3": _sense_voice(0.48, ort=True, max_s=3.0),
+    # 兩者合併：首字同 p480，短句計算量同 p480-960，長句段的最壞情況有上限
+    "sensevoice-small-int8-ort-p480-960-max3": _sense_voice(
+        0.96, ort=True, first_s=0.48, max_s=3.0
+    ),
 }
 
 
