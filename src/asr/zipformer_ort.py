@@ -20,13 +20,18 @@
   DynamicQuantizeLinear 依 ONNX 定義是整個 tensor 共用一個 scale，但 ORT 圖最佳化（EXTENDED 以上）
   把它與 MatMulInteger 融合成 DynamicQuantizeMatMul，arm64 上是逐列量化，批次不影響結果
   （關掉最佳化時逐列與批次的 logit 最多差 0.16）。載入時以隨機輸入自我檢查，不成立就退回逐 frame。
+- CoreML Execution Provider（選用，`CoreMLOptions`；預設只用 CPU）：第二階段前哨實驗
+  （docs/progress.md 2026-11-02）。encoder 的批次維度 N 是符號維度，ORT 推不出大部分張量的形狀，
+  CoreML EP 只接得下 1880 / 7431 個節點；把 N 固定為 1（`add_free_dimension_override_by_name`）
+  後 3915 / 4828 個，但 INT8 的 DynamicQuantizeLinear / MatMulInteger 不被 CoreML EP 支援，
+  每層都被切開（約 415 個 partition）。joiner 的 N 隨批次 joiner 變動，不能固定。
 - 文字：token 開頭的「▁」視為空白，但前後都是非 ASCII（中文）時省略，最後去掉首尾空白
   （例：「昨天是 MONDAY TODAY IS 礼拜二」）。
 """
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -46,6 +51,34 @@ class OrtTransducerConfig:
     # 意義與值同 `SherpaTransducerConfig.tail_padding_s`（各模型的值在 `src.asr.TRANSDUCER_SPECS`）
     tail_padding_s: float = 0.66
     blank_penalty: float = 0.0
+
+
+CoreMLComputeUnits = Literal["CPUOnly", "CPUAndGPU", "CPUAndNeuralEngine", "ALL"]
+CoreMLModelFormat = Literal["MLProgram", "NeuralNetwork"]
+OrtPart = Literal["encoder", "decoder", "joiner"]
+
+
+@dataclass(frozen=True)
+class CoreMLOptions:
+    """onnxruntime CoreML Execution Provider 的設定（只給量測用，見模組說明）。"""
+
+    compute_units: CoreMLComputeUnits = "ALL"
+    model_format: CoreMLModelFormat = "MLProgram"
+    parts: tuple[OrtPart, ...] = ("encoder",)  # 用 CoreML EP 的 session，其餘只用 CPU
+    # encoder / decoder 的批次維度 N 固定為 1（單一 stream 一定是 1；joiner 不固定）
+    fix_batch_dim: bool = True
+    # 其他 provider 選項，例如 ("RequireStaticInputShapes", "1")、("ModelCacheDirectory", 路徑)
+    extra: tuple[tuple[str, str], ...] = ()
+
+    def providers(self) -> list[Any]:
+        opts = {"MLComputeUnits": self.compute_units, "ModelFormat": self.model_format}
+        return [("CoreMLExecutionProvider", {**opts, **dict(self.extra)}), "CPUExecutionProvider"]
+
+
+def coreml_available() -> bool:
+    import onnxruntime as ort  # type: ignore[import-untyped]
+
+    return "CoreMLExecutionProvider" in ort.get_available_providers()
 
 
 def tokens_to_text(tokens: list[str]) -> str:
@@ -139,14 +172,19 @@ class ZipformerOrtAsr(StreamingAsr):
         config: OrtTransducerConfig | None = None,
         models_dir: Path = MODELS_DIR,
         sess_options: Any = None,
+        coreml: CoreMLOptions | None = None,
     ) -> None:
         """`sess_options`：自訂的 `ort.SessionOptions`（量測 session 選項用，見
-        scripts/bench_asr_compute.py）；給定時執行緒數以它為準。"""
+        scripts/bench_asr_compute.py）；給定時執行緒數以它為準。
+        `coreml`：`parts` 中的 session 改用 CoreML EP（不在 CoreML 上的節點仍由 CPU 執行）。"""
         import kaldi_native_fbank as knf  # type: ignore[import-untyped]
-        import onnxruntime as ort  # type: ignore[import-untyped]
+        import onnxruntime as ort
 
         self.files = files
         self.config = config or OrtTransducerConfig()
+        self.coreml = coreml
+        if coreml is not None and sess_options is not None:
+            raise ValueError("sess_options 與 coreml 不能同時給")
         paths = self._paths = files.paths(models_dir)
         missing = [str(p) for p in paths.values() if not p.is_file()]
         if missing:
@@ -154,15 +192,24 @@ class ZipformerOrtAsr(StreamingAsr):
                 "找不到模型檔，請先執行 bash scripts/download_models.sh：\n  "
                 + "\n  ".join(missing)
             )
-        opts: Any = sess_options
-        if opts is None:
+
+        def new_options() -> Any:
             opts = ort.SessionOptions()
             opts.intra_op_num_threads = self.config.num_threads
             opts.inter_op_num_threads = 1
+            return opts
 
-        def session(name: str) -> Any:
+        shared_opts: Any = sess_options if sess_options is not None else new_options()
+
+        def session(name: OrtPart) -> Any:
+            opts, providers = shared_opts, ["CPUExecutionProvider"]
+            if coreml is not None and name in coreml.parts:
+                providers = coreml.providers()
+                if coreml.fix_batch_dim and name != "joiner":
+                    opts = new_options()
+                    opts.add_free_dimension_override_by_name("N", 1)
             # 以檔案路徑建立 session（不先讀進記憶體）
-            return ort.InferenceSession(str(paths[name]), opts, providers=["CPUExecutionProvider"])
+            return ort.InferenceSession(str(paths[name]), opts, providers=providers)
 
         self._encoder = session("encoder")
         self._decoder = session("decoder")
@@ -248,6 +295,12 @@ class ZipformerOrtAsr(StreamingAsr):
             f"onnxruntime/{self.files.model_dir}/{self.files.encoder}"
             f" threads={self.config.num_threads} greedy_search"
             + (f" blank_penalty={self.config.blank_penalty:g}" if self.config.blank_penalty else "")
+            + (
+                f" coreml={self.coreml.compute_units}/{self.coreml.model_format}"
+                f"/{'+'.join(self.coreml.parts)}"
+                if self.coreml
+                else ""
+            )
         )
 
     def model_files(self) -> list[Path]:

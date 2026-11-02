@@ -1,4 +1,4 @@
-"""ASR / VAD 推論計算時間的細部量測（backlog B8：多執行緒、ORT session 選項）。
+"""ASR / VAD 推論計算時間的細部量測（backlog B8：多執行緒、ORT session 選項；CoreML EP）。
 
 不經 pipeline、不模擬即時，只量計算本身。每句音訊整條以 10 ms chunk 送入 ASR stream 再 finalize，記錄：
 
@@ -9,12 +9,19 @@
 - VAD：Silero 每個 32 ms frame 的耗時。
 - 結果：全部句子的 token 序列雜湊，以及和第一個設定不同的句數（多執行緒、圖最佳化可能改變結果）。
 - 記憶體：載入後與量測結束時的 RSS、physical footprint（vmmap，與 scripts/probe_footprint.py 相同）。
+- 載入：建立 ASR 三個 session 的時間（CoreML EP 含編譯 Core ML 模型）。
+
+`--ep` 指定 ASR 的 execution provider：`cpu`（預設），或 `coreml:<compute units>[:<格式>[:<parts>]]`，
+compute units 為 CPUOnly / CPUAndGPU / CPUAndNeuralEngine / ALL，格式為 MLProgram（預設）/
+NeuralNetwork，parts 以 + 連接（預設 encoder），例如 `coreml:ALL:MLProgram:encoder+decoder`。
+CoreML 只套用在 ASR（VAD 仍為 CPU），且只能搭配 `--preset default`。
 
 每個設定在獨立子程序中執行；`--repeat N` 時各設定交錯重跑 N 輪（減少背景負載的偏差），計時取各輪中位數。
 
     uv run scripts/bench_asr_compute.py                         # 執行緒 1 / 2 / 4，預設 session 選項
     uv run scripts/bench_asr_compute.py --threads 1 --preset default extended no-arena no-spin
     uv run scripts/bench_asr_compute.py --manifest data/aishell1_align_300/manifest.jsonl --limit 0
+    uv run scripts/bench_asr_compute.py --threads 1 --ep cpu coreml:CPUOnly coreml:ALL --repeat 3
 """
 
 import argparse
@@ -79,7 +86,28 @@ def _footprint_snapshot() -> Callable[[str], dict[str, Any]]:
     return snapshot
 
 
-def worker(model: str, threads: int, preset: str, manifest: Path, limit: int) -> dict[str, Any]:
+def parse_ep(spec: str) -> Any:
+    """`--ep` 的字串 → `CoreMLOptions`（`cpu` 為 None）。"""
+    from src.asr import CoreMLOptions
+
+    if spec == "cpu":
+        return None
+    kind, *fields = spec.split(":")
+    if kind != "coreml" or not 1 <= len(fields) <= 3:
+        raise ValueError(f"--ep 格式錯誤：{spec}")
+    units, fmt, parts = (fields + ["MLProgram", "encoder"][len(fields) - 1 :])[:3]
+    if units not in ("CPUOnly", "CPUAndGPU", "CPUAndNeuralEngine", "ALL"):
+        raise ValueError(f"compute units 錯誤：{units}")
+    if fmt not in ("MLProgram", "NeuralNetwork"):
+        raise ValueError(f"格式錯誤：{fmt}")
+    if not set(parts.split("+")) <= {"encoder", "decoder", "joiner"}:
+        raise ValueError(f"parts 錯誤：{parts}")
+    return CoreMLOptions(units, fmt, tuple(parts.split("+")))  # type: ignore[arg-type]
+
+
+def worker(
+    model: str, threads: int, preset: str, ep: str, manifest: Path, limit: int
+) -> dict[str, Any]:
     import onnxruntime as ort
 
     from src.asr import TRANSDUCER_SPECS, OrtTransducerConfig, ZipformerOrtAsr
@@ -90,13 +118,19 @@ def worker(model: str, threads: int, preset: str, manifest: Path, limit: int) ->
     opts.intra_op_num_threads = threads
     opts.inter_op_num_threads = 1
     PRESETS[preset](opts)
+    coreml = parse_ep(ep)
+    if coreml is not None and preset != "default":
+        raise ValueError("CoreML EP 只能搭配 --preset default")
 
     files, tail_padding_s = TRANSDUCER_SPECS[model.removesuffix("-ort")]
+    t_load = time.perf_counter()
     asr = ZipformerOrtAsr(
         files,
         OrtTransducerConfig(num_threads=threads, tail_padding_s=tail_padding_s),
-        sess_options=opts,
+        sess_options=opts if coreml is None else None,
+        coreml=coreml,
     )
+    load_s = time.perf_counter() - t_load
     if preset == "per-frame-joiner":
         asr._batch_joiner = False
     vad = SileroVadModel(num_threads=threads, sess_options=opts)
@@ -175,6 +209,8 @@ def worker(model: str, threads: int, preset: str, manifest: Path, limit: int) ->
         "model": model,
         "threads": threads,
         "preset": preset,
+        "ep": ep,
+        "load_s": load_s,
         "batch_joiner": asr._batch_joiner,
         "num_utterances": len(wavs),
         "audio_s": audio_s,
@@ -206,6 +242,7 @@ def _median_run(runs: list[dict[str, Any]]) -> dict[str, Any]:
     out["asr_rtf"] = statistics.median(r["asr_rtf"] for r in runs)
     out["vad_rtf"] = statistics.median(r["vad_rtf"] for r in runs)
     out["redecode_ms_per_audio_s"] = statistics.median(r["redecode_ms_per_audio_s"] for r in runs)
+    out["load_s"] = statistics.median(r["load_s"] for r in runs)
     for key in ("encoder_ms", "search_ms", "finalize_ms", "redecode_ms", "vad_frame_ms"):
         out[key] = {k: statistics.median(r[key][k] for r in runs) for k in runs[0][key]}
     out["repeats"] = len(runs)
@@ -229,41 +266,49 @@ def main() -> int:
     )
     p.add_argument("--threads", type=int, nargs="+", default=[1, 2, 4])
     p.add_argument("--preset", nargs="+", default=["default"], choices=sorted(PRESETS))
+    p.add_argument(
+        "--ep", nargs="+", default=["cpu"], help="ASR 的 execution provider（格式見說明）"
+    )
     p.add_argument("--repeat", type=int, default=1, help="各設定交錯重跑幾輪，計時取中位數")
     p.add_argument("--results-dir", type=Path, default=REPO_ROOT / "eval/results")
     p.add_argument(
-        "--worker", nargs=3, metavar=("MODEL", "THREADS", "PRESET"), help=argparse.SUPPRESS
+        "--worker", nargs=4, metavar=("MODEL", "THREADS", "PRESET", "EP"), help=argparse.SUPPRESS
     )
     args = p.parse_args()
 
     if args.worker:
-        model, threads, preset = args.worker
-        print(json.dumps(worker(model, int(threads), preset, args.manifest, args.limit)))
+        model, threads, preset, ep = args.worker
+        print(json.dumps(worker(model, int(threads), preset, ep, args.manifest, args.limit)))
         return 0
 
-    configs = [(t, s) for t in args.threads for s in args.preset]
-    runs: dict[tuple[int, str], list[dict[str, Any]]] = {c: [] for c in configs}
+    for ep in args.ep:
+        parse_ep(ep)  # 先檢查格式
+    configs = [(t, s, e) for t in args.threads for s in args.preset for e in args.ep]
+    runs: dict[tuple[int, str, str], list[dict[str, Any]]] = {c: [] for c in configs}
     for r in range(args.repeat):
-        for threads, preset in configs:
+        for threads, preset, ep in configs:
             cmd = [sys.executable, __file__, "--manifest", str(args.manifest)]
-            cmd += ["--limit", str(args.limit), "--worker", args.model, str(threads), preset]
+            cmd += ["--limit", str(args.limit), "--worker", args.model, str(threads), preset, ep]
             out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
-            runs[(threads, preset)].append(json.loads(out.splitlines()[-1]))
-            print(f"  round {r + 1}/{args.repeat}: threads={threads} {preset}", file=sys.stderr)
+            runs[(threads, preset, ep)].append(json.loads(out.splitlines()[-1]))
+            print(
+                f"  round {r + 1}/{args.repeat}: threads={threads} {preset} {ep}", file=sys.stderr
+            )
 
     results = [_median_run(runs[c]) for c in configs]
     ref = results[0]["tokens"]
     print(
-        "| threads | preset | ASR RTF | encoder mean / P90 (ms) | search mean (ms) "
+        "| threads | preset | EP | 載入 (s) | ASR RTF | encoder mean / P90 (ms) | search mean (ms) "
         "| finalize mean / P90 (ms) | 重新解碼 (ms / 音訊 s) | VAD (ms / frame) "
         "| footprint 載入後 / 峰值 (MB) | 峰值 RSS (MB) | 結果與第一列不同的句數 |"
     )
-    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for res in results:
         res["utterances_differ_from_first"] = sum(a != b for a, b in zip(ref, res["tokens"]))
         m = res["memory_mb"]
         print(
-            f"| {res['threads']} | {res['preset']} | {res['asr_rtf']:.4f} "
+            f"| {res['threads']} | {res['preset']} | {res['ep']} | {res['load_s']:.1f} "
+            f"| {res['asr_rtf']:.4f} "
             f"| {res['encoder_ms']['mean']:.2f} / {res['encoder_ms']['p90']:.2f} "
             f"| {res['search_ms']['mean']:.2f} "
             f"| {res['finalize_ms']['mean']:.1f} / {res['finalize_ms']['p90']:.1f} "

@@ -21,7 +21,12 @@ from src.asr.sherpa import (
     SherpaTransducerConfig,
     TransducerFiles,
 )
-from src.asr.zipformer_ort import OrtTransducerConfig, ZipformerOrtAsr
+from src.asr.zipformer_ort import (
+    CoreMLComputeUnits,
+    CoreMLOptions,
+    OrtTransducerConfig,
+    ZipformerOrtAsr,
+)
 from src.audio import SAMPLE_RATE
 
 __all__ = [
@@ -29,6 +34,7 @@ __all__ = [
     "SAMPLE_RATE",
     "TRANSDUCER_SPECS",
     "AsrStream",
+    "CoreMLOptions",
     "DecodeOptions",
     "OrtTransducerConfig",
     "SenseVoiceAsr",
@@ -90,7 +96,7 @@ def _transducer(name: str) -> _Factory:
     return factory
 
 
-def _transducer_ort(name: str) -> _Factory:
+def _transducer_ort(name: str, coreml: CoreMLOptions | None = None) -> _Factory:
     files, tail_padding_s = TRANSDUCER_SPECS[name]
 
     def factory(threads: int, opts: DecodeOptions) -> StreamingAsr:
@@ -100,9 +106,20 @@ def _transducer_ort(name: str) -> _Factory:
             OrtTransducerConfig(
                 num_threads=threads, tail_padding_s=tail_padding_s, blank_penalty=opts.blank_penalty
             ),
+            coreml=coreml,
         )
 
     return factory
+
+
+# 第二階段前哨實驗：X-ASR 480 ms 的 encoder 改用 onnxruntime CoreML EP（MLProgram），
+# 名稱後綴 → compute units。比 CPU 慢約 3 倍（docs/progress.md 2026-11-02），只供量測。
+_COREML_UNITS: dict[str, CoreMLComputeUnits] = {
+    "cpu": "CPUOnly",
+    "gpu": "CPUAndGPU",
+    "ane": "CPUAndNeuralEngine",
+    "all": "ALL",
+}
 
 
 def _sense_voice(partial_every_s: float | None, ort: bool = False) -> _Factory:
@@ -129,6 +146,12 @@ _REGISTRY: dict[str, _Factory] = {
     "x-asr-480ms-int8-ort": _transducer_ort("x-asr-480ms-int8"),
     # 160 ms 版同樣做法；只在測試音訊上與 sherpa-onnx 版比對過，未跑冒煙集（docs/progress.md 2026-11-01）
     "x-asr-160ms-int8-ort": _transducer_ort("x-asr-160ms-int8"),
+    **{
+        f"x-asr-480ms-int8-ort-coreml-{suffix}": _transducer_ort(
+            "x-asr-480ms-int8", CoreMLOptions(units)
+        )
+        for suffix, units in _COREML_UNITS.items()
+    },
     # 非串流：說話中沒有 partial，首字要等到 finalize（VAD 結束或暫定結果）
     "sensevoice-small-int8": _sense_voice(None),
     # 同上，但每累積 0.48 s 音訊就整段重新辨識一次當 partial（與 X-ASR 480 ms 的更新頻率相同）
