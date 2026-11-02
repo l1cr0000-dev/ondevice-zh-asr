@@ -2,7 +2,7 @@
 
 持續更新的清單：已知問題、要做的優化、優先順序。做完的項目移到最下方「已完成」，並在 [progress.md](progress.md) 寫實驗紀錄。數字出自 2026-10-30 的 AISHELL-1 掃描（commit `f576d57`），細節見 progress.md。
 
-**目前狀態（2026-11-02）**：預設為 X-ASR 480 ms INT8 + onnxruntime 1.31.1 直接推論（峰值 RSS 541 → 353 MB）、結束判定 A2（pause 150 / min_silence 1000）、greedy search 批次 joiner；SenseVoice 支援熱詞（CTC prefix beam search，選項）。B1 推論端已到頭，B9 方案定案，B8 CPU 調校無可再調。未合併的實驗分支（small CTC、偽串流降計算量、B4 車內噪音、B11 評測 RSS、B7 取消 FP32）見 progress.md「未合併分支的實驗紀錄」。2026-11-02 已完成：B0 麥克風真實延遲（模擬值可代表真實路徑）、B14 partial 穩定度（偽串流跳動是 X-ASR 的 2–6 倍）、B16 CoreML EP 前哨（官方 INT8 不加速）。
+**目前狀態（2026-11-02）**：**預設模型改為 SenseVoice 偽串流 `sensevoice-small-int8-ort-p480-960-max3`**（使用者決定；200 句 CER 3.40 vs 4.80%、首字 405 vs 1006 ms，代價見 progress.md 同日「決定」一節），X-ASR 480 ms INT8 + onnxruntime 1.31.1 保留為選項（峰值 RSS 541 → 353 MB）、結束判定 A2（pause 150 / min_silence 1000）、greedy search 批次 joiner；SenseVoice 支援熱詞（CTC prefix beam search，選項）。B1 推論端已到頭，B9 方案定案，B8 CPU 調校無可再調。未合併的實驗分支（small CTC、偽串流降計算量、B4 車內噪音、B11 評測 RSS、B7 取消 FP32）見 progress.md「未合併分支的實驗紀錄」。2026-11-02 已完成：B0 麥克風真實延遲（模擬值可代表真實路徑）、B14 partial 穩定度（偽串流跳動是 X-ASR 的 2–6 倍）、B16 CoreML EP 前哨（官方 INT8 不加速）。
 **暫緩（使用者決定，2026-11-01）**：噪音測試加強（SNR 定義）、跨領域評測集（B6a）等垂直領域適配——真實車艙有 SSE 語音增強前端；X-ASR 熱詞、n-gram LM、偽串流 partial 只用 greedy / beam search 改 C++（見 B15）。
 **2026-10-30**：第一階段全鏈路已完成（tag `v1`，commit `f6b11a8`），開始逐項處理下列問題。麥克風路徑直接使用 `StreamingPipeline`，對 pipeline 的改動（VAD 預先啟動、斷句）會自動套用到麥克風。
 
@@ -10,11 +10,10 @@
 
 ## 建議處理順序
 
-1. 預設模型的選擇：SenseVoice 偽串流 vs X-ASR（取決於畫面是否即時顯示 partial；B14 的 hold 顯示規則可讓 X-ASR 的修正幾乎歸零，尚未實作）
+1. 新預設（SenseVoice 偽串流）的後續：閒置時重量 RTF 與延遲、商用書面確認（使用者處理）、若畫面顯示 partial 需要穩定化顯示規則（B14）
 2. 第二階段：**B16** Core ML（官方 INT8，不自行量化；ORT CoreML EP 不加速，下一步改寫量化矩陣乘法，需下載 `onnx`）、**B11** 模型體積
-3. 偽串流當預設的其餘前提：閒置時重量 RTF 與延遲、SenseVoice 商用書面確認（使用者處理）
-4. **B13** 公開前替換 macOS 系統語音產生的測試 fixture（要公開 repo 時才必要）
-5. 有空再做：B8 閒置重量執行緒、B10、B12、B15
+3. **B13** 公開前替換 macOS 系統語音產生的測試 fixture（要公開 repo 時才必要）
+4. 有空再做：B8 閒置重量執行緒、B10、B12、B15
 - 已告一段落：**B0** 麥克風真實延遲（軟體路徑已量測，2026-11-02，差距 < 25 ms；聲學 / 虛擬裝置回送需使用者同意，未做）、**B1** 首字延遲（推論端無可再降，主因是模型輸出延遲）、**B9** 結束判定（A2 + pause 150 為預設）、**B4 / B5** 連續多句集與 MFA 真實起點（車內噪音版在未合併分支）、**B7** 取消（不建立 FP32 參照）
 
 ---

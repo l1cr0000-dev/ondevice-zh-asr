@@ -1183,7 +1183,7 @@ profile（cProfile）：時間 97% 在 `session.run`，Python 端（fbank 送入
 | 分支 / commit | 內容 | 結論（小集合，200 / 300 句） |
 |---|---|---|
 | `feat/light-ctc` / 3740c3a | 串流 zipformer small CTC INT8（27 MB）的 onnxruntime 後端 `small-ctc-zh-int8-ort` | CER 約 2 倍（200 句 9.34 vs 4.80%、300 句 7.00 vs 3.28%，皆顯著）；首字快約 300 ms（P50 706 vs 1036 ms）、峰值 RSS 約 183 vs 359–448 MB。不當預設，輕量備選 |
-| `feat/pseudo-stream` / 161140b、b6583c5、d331ad9 | SenseVoice 偽串流降計算量（`PartialSchedule`）、≤ 3 s 短句子集、授權查證 | 建議設定 `sensevoice-small-int8-ort-p480-960-max3`：可見首字 429–449 vs X-ASR 970–1086 ms，RTF 同量級，CER 持平；說完 → 完整結果慢 18–128 ms、RSS 多約 60–170 MB；商用依據只有 issue #287 的維護者回覆。保留為選項，預設不變（100 句 ×2、25 條，負載下量測） |
+| `feat/pseudo-stream` / 161140b、b6583c5、d331ad9（**2026-11-02 已合併**，並設為預設） | SenseVoice 偽串流降計算量（`PartialSchedule`）、≤ 3 s 短句子集、授權查證 | 建議設定 `sensevoice-small-int8-ort-p480-960-max3`：可見首字 429–449 vs X-ASR 970–1086 ms，RTF 同量級，CER 持平；說完 → 完整結果慢 18–128 ms、RSS 多約 60–170 MB；商用依據只有 issue #287 的維護者回覆。保留為選項，預設不變（100 句 ×2、25 條，負載下量測） |
 | `feat/b4-noise` / d4f00da | DEMAND TCAR 車內噪音連續集（20 / 10 / 5 / 0 / −5 dB）與 VAD 誤觸發指標 | 誤觸發全為 0、CER 3.30–3.53% 與乾淨集無顯著差；TCAR 能量 98.7% 在 100 Hz 以下，寬頻 SNR 高估干擾，SNR 定義待決定 |
 | `feat/b11-eval-rss` / 21048e7 | 評測峰值 RSS 隨句數上升：改成以最長 20 句暖機 | 增長是推論暖機（malloc 碎片、程式碼分頁），不是洩漏；修正評測口徑，不影響 pipeline |
 | `feat/b7-no-fp32` / 0763a19、be2df9c、0d135e2 | 取消 FP32 參照、第二階段改為官方 INT8 + Core ML、X-ASR 參數量 | 純文件；X-ASR 153.4M 參數（97% INT8）、zh-14M 13.8M |
@@ -1621,3 +1621,37 @@ uv run eval/run_eval.py --manifest data/aishell1_continuous_300/manifest.jsonl \
 - 只跑小量（100 句 ×2、25 條），CER 的信賴區間約 ±1 個百分點。
 - RTF 與延遲在同機有其他 benchmark 時量，設定之間只能用重新辨識音訊比比較計算量。
 - 沒有跑車內噪音。
+
+---
+
+## 2026-11-02　決定：預設改為 SenseVoice 偽串流（`sensevoice-small-int8-ort-p480-960-max3`）
+
+使用者決定（「改成預設」）。先合併 `feat/pseudo-stream`（偽串流降計算量的 `PartialSchedule`、短句子集、授權查證；與已合併的熱詞解碼共用 `SenseVoiceConfig` / `SenseVoiceDecoder`），再把 `src/asr/__init__.py` 的 `DEFAULT_MODEL` 從 `x-asr-480ms-int8-ort` 改為 `sensevoice-small-int8-ort-p480-960-max3`。X-ASR 保留為選項；熱詞預設不開（beam 1 = greedy，與合併前逐句相同）。
+
+**200 句冒煙集**（`run_eval.py --smoke --model sensevoice-small-int8-ort-p480-960-max3 x-asr-480ms-int8-ort`，A2 預設斷句，同一批依序跑；load average 約 2.6–3.4，主要是 Claude 桌面程式，RTF 只看相對差）：
+
+| | SenseVoice 偽串流（新預設） | X-ASR 480 ms（舊預設） |
+|---|---|---|
+| CER [句 95% CI] | **3.40** [2.50, 4.37] | 4.80 [3.76, 5.93] |
+| 首字延遲（VAD 起點）mean / P90 (ms) | **405 / 409** | 1006 / 1029 |
+| 端到端首字延遲 mean / P90 (ms) | **914 / 971** | 1515 / 1623 |
+| 尾字延遲 mean (ms) | 998 | 998 |
+| RTF | 0.0507 | **0.0324** |
+| 峰值 RSS (MB) | 444 | **358** |
+| 模型大小 (MB) | 230.7 | **163.6** |
+
+X-ASR 這一列與合併前的冒煙集結果相同（CER 4.80%）。RTF 比為 1.56 倍，比偽串流降計算量一節「同量級」的說法高；那一節是不同時間、不同負載下量的，這裡是同批。
+
+**採用的理由**：首字快約 0.6 s、CER 持平或略好（200 句顯著，300 句各子集不顯著）、已有熱詞（beam 8 + 熱詞，熱詞句 CER 顯著下降）。
+
+**已知代價**（各節見上）：
+
+- partial 穩定度：被改掉的字是 X-ASR 的 2–6 倍，字穩定延遲 P90 約 1 s，第一個 partial 14–32% 是英文 / 數字碎片；累積超過 3 s 後 partial 不再更新。若畫面要即時顯示 partial，這是主要缺點；只依最終結果執行指令則不受影響。
+- 說完 → 完整結果慢約 20–130 ms（短句 / 單句 / 連續）。
+- RTF 約 1.5 倍、峰值 RSS 多約 90 MB（隨音訊長度增加，約 3.8 MB / s）、模型大 67 MB。
+- 授權：FunASR Model License 文字沒有商用條款，商用依據只有 issue #287 的維護者回覆；正式商用前需書面確認（[models.md](models.md)）。
+- 沒有 token 時間戳（`first_token_audio_s` 為 None），依賴它的分析（字級延遲拆解）只適用 X-ASR。
+
+**測試**：`tests/test_pipeline.py::test_end_to_end_two_utterances` 用預設模型，原本檢查的「partial 只追加、有 token 時間戳」是真串流的性質，改為偽串流時只檢查 CER、切段與首字延遲範圍。pytest 176 個、mypy、ruff 通過。
+
+**待辦**：閒置機器上重量 RTF 與延遲；SenseVoice 商用書面確認（使用者處理）；若畫面要顯示 partial，需要不犧牲首字的穩定化顯示規則（B14）。依「優化階段只跑小集合」，3000 句未跑，README 的 3000 句模型比較表沒有 SenseVoice。

@@ -14,7 +14,14 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from src.asr import DEFAULT_MODEL, SAMPLE_RATE, AsrStream, StreamingAsr, load_asr
+from src.asr import (
+    DEFAULT_MODEL,
+    SAMPLE_RATE,
+    AsrStream,
+    SenseVoiceOrtAsr,
+    StreamingAsr,
+    load_asr,
+)
 from src.pipeline import Partial, PipelineConfig, StreamingPipeline, Utterance, transcribe
 from src.vad import DEFAULT_MODEL_PATH, SileroVadModel, VadConfig, load_wav
 
@@ -305,7 +312,11 @@ def test_end_to_end_two_utterances(models: tuple[SileroVadModel, StreamingAsr]) 
         # 首字延遲：至少要等 VAD 確認 + ASR 第一個 chunk，但不該超過 1.5 s
         assert utt.first_token_latency_s is not None
         assert 0.3 < utt.first_token_latency_s < 1.5
-        # 模型回報的首字位置在送入的音訊範圍內，且不晚於首字實際出現的時刻
+        if isinstance(asr, SenseVoiceOrtAsr):
+            # 偽串流（預設）：每次整段重新辨識，沒有 token 時間戳，partial 可以改寫前面的字
+            assert utt.first_token_audio_s is None
+            continue
+        # 真串流（transducer）：模型回報的首字位置在送入的音訊範圍內，且不晚於首字實際出現的時刻
         assert utt.first_token_audio_s is not None
         assert utt.audio_start_s <= utt.first_token_audio_s <= utt.first_token_s
         # partial 不倒退，且最後一個 partial 是最終結果的前綴

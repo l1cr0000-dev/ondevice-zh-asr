@@ -50,7 +50,7 @@ flowchart LR
 - **離線與串流共用同一個狀態機**（離線 = 整段送入後 flush），兩者結果必然一致，有測試保證。
 - **時間戳用「模擬即時」虛擬時鐘**：chunk 的最後一個樣本到達時刻 + 實際量測的計算時間，不真的 sleep；計算比音訊慢時會自然積壓。
 
-首字延遲的組成（X-ASR 480 ms，預設設定）：
+首字延遲的組成（X-ASR 480 ms，2026-11-02 前的預設模型）：
 
 ```mermaid
 sequenceDiagram
@@ -90,7 +90,7 @@ uv run pytest                             # 應為 84 passed、0 skipped
 ```bash
 uv run scripts/demo_vad.py [input.wav]    # VAD：印出語音段時間（--stream 看串流事件）
 uv run scripts/demo_asr.py [input.wav]    # 串流 ASR：模擬即時逐 chunk 送入，印出 partial / 最終結果
-                                          # --model x-asr-480ms-int8-ort（預設）| x-asr-480ms-int8 | zipformer-zh-14m
+                                          # --model sensevoice-small-int8-ort-p480-960-max3（預設）| x-asr-480ms-int8-ort | zipformer-zh-14m
 uv run scripts/run_pipeline.py [input.wav] -o out.json  # VAD + ASR：每句文字與時間戳（JSON）
 uv run scripts/demo_mic.py                # 麥克風即時辨識，Ctrl+C 結束並印出首字延遲統計
 ```
@@ -139,7 +139,7 @@ CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句、每條前補 1 �
 
 | 模型 | 精度 | CER (%) | CER 95% CI（以句） | RTF§ | 端到端首字延遲 mean / P50 / P90 / P99 (ms)¶ | 首字延遲（VAD 起點）mean / P90 (ms) | 其中 VAD 觸發 (ms) | 尾字延遲 mean (ms)* | 每條切段數 | 峰值 RSS (MB)† | 模型大小 (MB) |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| **X-ASR 480 ms**（預設）‡ | encoder / joiner INT8，decoder FP32 | **4.11** | [3.84, 4.38] | 0.026 | 1487 / 1533 / 1623 / 2073 | 972 / 1030 | 291 | 531 | 1.19 | 626 | 163.6 |
+| **X-ASR 480 ms**（2026-11-02 前的預設）‡ | encoder / joiner INT8，decoder FP32 | **4.11** | [3.84, 4.38] | 0.026 | 1487 / 1533 / 1623 / 2073 | 972 / 1030 | 291 | 531 | 1.19 | 626 | 163.6 |
 | X-ASR 160 ms‡ | 同上 | 5.05 | [4.76, 5.34] | 0.055 | 1359 / 1369 / 1559 / 1780 | 845 / 1023 | 291 | 604 | 1.19 | 639 | 163.6 |
 | zipformer-zh-14M（320 ms） | FP32 | 12.92 | [12.44, 13.41] | 0.011 | 1179 / 1144 / 1464 / 1844 | 666 / 958 | 291 | 494 | 1.19 | 335 | 55.3 |
 
@@ -157,6 +157,18 @@ CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句、每條前補 1 �
 \* 尾字延遲：VAD 語音終點（含 30 ms pad）→ 最終結果，≈ min_silence + 30–100 ms。上一版沒有後補靜音，句子多由音訊結束收尾，量到的值被截斷（X-ASR 480 ms 為 451 ms）。以 MFA 真實末字結束點起算，X-ASR 480 ms 為 580 ms（P90 651，300 句對齊集）。結束判定各設定的比較見 [docs/scoreboard.md](docs/scoreboard.md)。
 † 峰值 RSS 隨評測句數增加（200 句時 X-ASR 531、zh-14M 252 MB），增加的部分來自評測 / pipeline 端，不是模型推論（單獨解碼 100 → 1000 句只增加約 3 MB），原因待查，見 [backlog B11](docs/backlog.md)。不同評測集之間的峰值 RSS 不要直接比較。
 預設後端自 2026-11-01 起改為 onnxruntime 1.31.1 直接推論（`x-asr-480ms-int8-ort`），辨識結果與 sherpa-onnx 版逐句相同（200 句冒煙集），表中的 CER 與延遲不變；峰值 RSS 在 200 句冒煙集上 541 → 353 MB，3000 句未重跑。見 [docs/progress.md](docs/progress.md)。
+
+**2026-11-02 起預設模型改為 SenseVoice Small 偽串流**（`sensevoice-small-int8-ort-p480-960-max3`：非串流 CTC 模型，第一次在累積 0.48 s 時整段辨識出 partial，之後每 0.96 s 一次，累積超過 3 s 不再更新、等暫定結果 / 定稿）。X-ASR 保留為 `x-asr-480ms-int8-ort`。200 句冒煙集（A2 預設斷句，同批，量測時 load average 約 3）：
+
+| | SenseVoice 偽串流（預設） | X-ASR 480 ms |
+|---|---|---|
+| CER [95% CI] | **3.40** [2.50, 4.37] | 4.80 [3.76, 5.93] |
+| 首字延遲（VAD 起點）mean / P90 (ms) | **405 / 409** | 1006 / 1029 |
+| 端到端首字延遲 mean / P90 (ms) | **914 / 971** | 1515 / 1623 |
+| RTF | 0.051 | **0.032** |
+| 峰值 RSS (MB) / 模型 (MB) | 444 / 230.7 | **358 / 163.6** |
+
+代價（見 [docs/progress.md](docs/progress.md) 2026-11-02「決定：預設改為 SenseVoice 偽串流」）：partial 每次整段重新辨識，畫面文字跳動是 X-ASR 的 2–6 倍（第一個 partial 有 14–32% 是英文碎片）；說完到完整結果慢約 20–130 ms；RTF 與記憶體較高；SenseVoice 權重採 FunASR Model License，商用依據目前只有維護者在 issue 中的回覆（[docs/models.md](docs/models.md)），正式商用前需書面確認。上方 3000 句的模型比較表未含 SenseVoice。
 ‡ X-ASR 的訓練資料是否含 AISHELL-1 未知（見 [docs/models.md](docs/models.md)），這個 CER 不能當作跨領域泛化能力；zh-14M 依文件只用 WenetSpeech，對它是跨領域。
 
 **VAD / pre-roll 掃描**（200 句子集，commit `f576d57`；選參數時的依據，數字與上表不同集）：CER (%)，首字延遲 mean / P90 (ms)

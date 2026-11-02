@@ -55,7 +55,10 @@ __all__ = [
     "load_asr",
 ]
 
-DEFAULT_MODEL = "x-asr-480ms-int8-ort"
+# 2026-11-02 使用者決定改為 SenseVoice 偽串流（docs/progress.md「決定：預設改為 SenseVoice 偽串流」）：
+# 首字約 0.45 s（X-ASR 約 1 s）、CER 持平或略好、支援熱詞；代價是 partial 跳動較多、結果慢數十 ms、
+# 記憶體較大、授權依據較弱。X-ASR 保留為 `x-asr-480ms-int8-ort`。
+DEFAULT_MODEL = "sensevoice-small-int8-ort-p480-960-max3"
 
 # sherpa-onnx transducer 模型：名稱 → (模型檔, 句尾補零秒數)。也供 scripts/probe_memory.py 直接載入。
 TRANSDUCER_SPECS: dict[str, tuple[TransducerFiles, float]] = {
