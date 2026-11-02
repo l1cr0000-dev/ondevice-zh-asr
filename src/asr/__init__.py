@@ -136,6 +136,7 @@ def _sense_voice(
     ort: bool = False,
     first_s: float | None = None,
     max_s: float | None = None,
+    language: str = "auto",
 ) -> _Factory:
     def factory(threads: int, opts: DecodeOptions) -> StreamingAsr:
         if opts.blank_penalty:
@@ -144,6 +145,7 @@ def _sense_voice(
             _no_ctc_options(opts)
         config = SenseVoiceConfig(
             num_threads=threads,
+            language=language,
             partial_every_s=partial_every_s,
             partial_first_s=first_s,
             partial_max_s=max_s,
@@ -186,6 +188,15 @@ _REGISTRY: dict[str, _Factory] = {
     "sensevoice-small-int8-ort-p480-960-max3": _sense_voice(
         0.96, ort=True, first_s=0.48, max_s=3.0
     ),
+    # 語言固定為中文（-zh；其餘同上），並掃第一次 partial 的時機 0.32 / 0.40 / 0.48 s
+    # （docs/progress.md 2026-11-02「SenseVoice 語言固定 zh 與第一次 partial」）。
+    # language=zh 時模型不再自行判斷語言，短音訊的第一個 partial 不會猜成英文碎片
+    **{
+        f"sensevoice-small-int8-ort-p{ms}-960-max3-zh": _sense_voice(
+            0.96, ort=True, first_s=ms / 1000, max_s=3.0, language="zh"
+        )
+        for ms in (320, 400, 480)
+    },
 }
 
 

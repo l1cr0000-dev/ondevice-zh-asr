@@ -155,6 +155,7 @@
 - **現況**：只量 CER 與延遲，沒有量畫面上文字被修改的次數與字數。A2 的暫定結果約 36–40% 的句子先出半句再被修正；SenseVoice 偽串流每次 partial 整段重新辨識，可能整句跳動，是它當預設的前提之一。
 - **2026-11-02 已量（progress.md）**：`eval/stability.py`（修正率、被改字數、前綴穩定延遲）。X-ASR 的串流 partial 只追加，修正全部來自 A2 暫定結果「縮回再補回」，hold 顯示規則（由結果 JSON 模擬）可降到 0.1%、首字不變；SenseVoice 偽串流被改的字是 X-ASR 的 2–6 倍、字穩定延遲 P90 約 1 s，第一個 partial 14–32% 是英文碎片，local agreement 壓跳動會讓首字晚於 X-ASR。
 - **未做**：hold 顯示規則實作到 pipeline / demo。
+- **2026-11-02 語言 / 第一次 partial（分支 `feat/sv-lang-first`，未合併）**：英文碎片來自語言自動判斷；固定 zh 後第一個 partial 全 ASCII 15–32% → 0–1.5%、首字正確 +21 個百分點，CER / 首字不變（`sensevoice-small-int8-ort-p480-960-max3-zh`，是否改預設待使用者決定）。first_s 0.40 快約 65 ms 但第一個 partial 較不準；0.32 受 VAD 觸發時機限制。顯示規則 `eval.stability.FirstPartialRule`（只模擬）：zh 之後「去 ASCII」幾乎免費，「≥ 2 中文字」+70–95 ms、改善小。
 
 ### B15　熱詞與語言模型的後續（暫緩）
 

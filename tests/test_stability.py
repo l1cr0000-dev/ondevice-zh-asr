@@ -4,7 +4,13 @@ from typing import Any
 
 import pytest
 
-from eval.stability import display_sequence, segment_stability, summarize_stability
+from eval.stability import (
+    FirstPartialRule,
+    apply_first_partial_rule,
+    display_sequence,
+    segment_stability,
+    summarize_stability,
+)
 
 
 def _seg(
@@ -108,3 +114,32 @@ def test_summary() -> None:
     assert st["stable_on_first_ratio"] == pytest.approx(4 / 8)
     # 舊結果沒有逐次 partial 紀錄
     assert summarize_stability([{"segments": [{"final_s": 1.0, "text": "好"}]}]) is None
+
+
+# ---------- 第一個 partial 的顯示規則 ----------
+
+
+def test_first_partial_rule_shows() -> None:
+    assert FirstPartialRule().shows("low")
+    assert not FirstPartialRule().shows("  ，")  # 正規化後沒有字
+    ascii_ = FirstPartialRule(drop_ascii=True)
+    assert not ascii_.shows("low") and not ascii_.shows("2 0")
+    assert ascii_.shows("嗯") and ascii_.shows("打开 carplay")
+    cjk2 = FirstPartialRule(min_cjk=2, drop_ascii=True)
+    assert not cjk2.shows("嗯") and not cjk2.shows("嗯 ok")
+    assert cjk2.shows("打开") and cjk2.shows("打开 carplay")
+    assert cjk2.describe() == "去 ASCII、≥ 2 中文字" and FirstPartialRule().describe() == "原樣"
+
+
+def test_apply_first_partial_rule_drops_only_leading_partials() -> None:
+    seg = _seg([(0.5, "low"), (1.0, "嗯"), (1.5, "今天"), (2.0, "今")], (2.5, "今天天气"))
+    seg["e2e_first_token_latency_s"] = 0.5
+    out = apply_first_partial_rule(seg, FirstPartialRule(min_cjk=2, drop_ascii=True))
+    # 第一個顯示的 partial 之後照常顯示（即使變短）
+    assert [p["text"] for p in out["partials"]] == ["今天", "今"]
+    assert out["e2e_first_token_latency_s"] == 1.5
+    assert len(seg["partials"]) == 4  # 原句段不變
+    # 沒有任何 partial 符合：畫面等最終結果
+    none = apply_first_partial_rule(seg, FirstPartialRule(min_cjk=5))
+    assert none["partials"] == [] and none["e2e_first_token_latency_s"] is None
+    assert [d.kind for d in display_sequence(none)] == ["final"]
