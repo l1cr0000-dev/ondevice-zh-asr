@@ -16,7 +16,7 @@ import pytest
 
 from src.asr import SAMPLE_RATE, AsrStream, StreamingAsr, available_models, load_asr
 from src.asr.sherpa import X_ASR_480MS, ZIPFORMER_ZH_14M, SherpaTransducerAsr
-from src.asr.zipformer_ort import ZipformerOrtAsr, tokens_to_text
+from src.asr.zipformer_ort import CoreMLOptions, ZipformerOrtAsr, coreml_available, tokens_to_text
 from src.paths import MODELS_DIR
 from src.vad import load_wav
 
@@ -306,3 +306,24 @@ def test_x_asr_ort_batched_joiner_matches_per_frame() -> None:
     asr._batch_joiner = False
     per_frame = [_transcribe_with_timestamps(asr, wav) for wav in wavs]
     assert batched == per_frame
+
+
+def test_x_asr_ort_rejects_sess_options_with_coreml() -> None:
+    with pytest.raises(ValueError, match="不能同時給"):
+        ZipformerOrtAsr(X_ASR_480MS, sess_options=object(), coreml=CoreMLOptions())
+
+
+@pytest.mark.skipif(not coreml_available(), reason="onnxruntime 沒有 CoreMLExecutionProvider")
+def test_x_asr_ort_coreml_encoder_close_to_cpu() -> None:
+    # encoder 改用 CoreML EP（編譯約 15 s）：INT8 運算仍在 CPU、其餘在 Core ML 以 FP16 / FP32 計算，
+    # 結果不保證逐位元相同，只要求與 CPU 版的文字接近（docs/progress.md 2026-11-02）
+    if not (MODELS_DIR / X_ASR_480MS.model_dir).is_dir():
+        pytest.skip("x-asr-480ms-int8 未下載，請先執行 bash scripts/download_models.sh")
+    cpu = ZipformerOrtAsr(X_ASR_480MS)
+    coreml = ZipformerOrtAsr(X_ASR_480MS, coreml=CoreMLOptions("CPUOnly"))
+    assert "CoreMLExecutionProvider" in coreml._encoder.get_providers()
+    assert coreml._decoder.get_providers() == ["CPUExecutionProvider"]
+    wavs = sorted(X_ASR_TEST_WAVS.glob("*.wav"))
+    expected = [_transcribe_with_timestamps(cpu, wav)[0] for wav in wavs]
+    got = [_transcribe_with_timestamps(coreml, wav)[0] for wav in wavs]
+    assert jiwer.cer(expected, got) < 0.05

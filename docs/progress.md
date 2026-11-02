@@ -1477,3 +1477,97 @@ uv run eval/run_eval.py --smoke --model x-asr-480ms-int8-ort sensevoice-small-in
 uv run eval/run_eval.py --manifest data/aishell1_continuous_300/manifest.jsonl \
     --model x-asr-480ms-int8-ort sensevoice-small-int8-ort-p480 --jobs 2 --tag stab
 ```
+
+---
+
+## 2026-11-02　第二階段前哨：onnxruntime CoreML EP 跑 X-ASR 480 ms 官方 INT8（不加速）
+
+環境：Apple M5（4 效能核 + 6 節能核）、macOS 27.0.1、onnxruntime 1.31.1（PyPI 版已內建 `CoreMLExecutionProvider`，不需另裝）、單執行緒。程式在 `feat/latency-b1`（`46fe454`）+ 本次提交上執行。量測期間機器上有其他工作階段（load average 2–4），計算時間只看同批交錯的相對差。第二階段的定義照使用者的決定：以官方 INT8 模型為準，不自行量化、不建 FP32 參照。
+
+### 做了什麼
+
+- `ZipformerOrtAsr` 多一個 `coreml: CoreMLOptions | None` 參數（預設 None = 只用 CPU，預設行為不變）：`compute_units`（CPUOnly / CPUAndGPU / CPUAndNeuralEngine / ALL）、`model_format`（MLProgram / NeuralNetwork）、`parts`（哪幾個 session 用 CoreML，預設只有 encoder）、`fix_batch_dim`（見下）、`extra`（其他 provider 選項，例如 `ModelCacheDirectory`）。
+- 登記 4 個量測用名稱 `x-asr-480ms-int8-ort-coreml-{cpu,gpu,ane,all}`（encoder 用 CoreML EP、MLProgram），可直接給 `run_eval.py --model`。
+- `scripts/bench_asr_compute.py` 加 `--ep cpu coreml:<units>[:<格式>[:<parts>]]`，並記錄載入時間。
+- 測試：`sess_options` 與 `coreml` 不能同時給；CoreML encoder（CPUOnly）在 4 個官方測試音訊上與 CPU 版文字接近（沒有 CoreML EP 時 skip）。
+
+### 節點分配（verbose log 的 GetCapability / VerifyEachNodeIsAssignedToAnEp）
+
+| 模型 | 設定 | 圖中節點（ORT 基本最佳化後） | CoreML 接下的節點 | partition 數 | 主要掉回 CPU 的運算 |
+|---|---|---|---|---|---|
+| encoder | MLProgram，N 為符號維度 | 7431 | 1880 | 525 | 形狀推不出（3854 次「has no shape」）+ INT8 運算 |
+| encoder | **MLProgram，N 固定為 1** | 4828 | **3915** | **415** | MatMulInteger 325、DynamicQuantizeLinear 306、Log 99、Equal 95、Expand 43、GatherElements 19 |
+| encoder | NeuralNetwork，N = 1 | 4828 | 3008 | 629 | 同上，另有更多運算不支援 |
+| encoder | MLProgram，N = 1，`RequireStaticInputShapes` / `EnableOnSubgraphs` | 4828 | 3914 / 3915 | 415 | 沒有差別 |
+| joiner | MLProgram（N 不能固定，批次 joiner 會變動） | 8 | 6（Add、Tanh 等） | 2 | DynamicQuantizeLinear + MatMulInteger |
+| decoder | MLProgram，N = 1 | 12 | 1（embedding Gather） | 1 | int64 的 Clip、GreaterOrEqual，之後的張量沒有形狀 |
+| Silero VAD | ALL（含 / 不含 `EnableOnSubgraphs`） | 2（頂層是 sr 的 If） | 0 / 子圖中 10 | 0 / 少量 | 頂層 If 不支援；子圖只接得下零星運算 |
+
+- encoder 的輸入、狀態都有符號批次維度 `N`，ORT 推不出大部分中間張量的形狀，CoreML EP 只接得下 1/4。以 `SessionOptions.add_free_dimension_override_by_name("N", 1)` 固定後（單一 stream 一定是 1）常數摺疊更多、圖從 7431 縮到 4828 個節點，CoreML 接下 81%。`CoreMLOptions.fix_batch_dim` 預設開，只套在 encoder / decoder。
+- **剩下的 19% 正好是每一層的量化矩陣乘法**：CoreML EP 不支援 `DynamicQuantizeLinear`、`MatMulInteger`（ONNX 的動態 INT8 量化格式在 Core ML 沒有對應運算），於是每個線性層都把圖切斷，encoder 被切成 415 段，每個 chunk 要在 CPU 與 Core ML 之間來回 415 次。
+- 而且 partition 先於 ORT 的融合：CPU 版會把 `DynamicQuantizeLinear + MatMulInteger` 融合成 `DynamicQuantizeMatMul`（B8），切給 CoreML 之後這兩個運算各自孤立、不再融合，CPU 端的 INT8 矩陣乘法反而變慢。
+
+**ORT profiling（encoder 10 個 chunk，負載下、profiling 本身也有開銷，只看比例）**
+
+| EP | 每 chunk (ms) | CoreML 段 | CPU 段 | CPU 段最大項 |
+|---|---|---|---|---|
+| CPU | 29.4 | — | 23.5 ms / 3127 個 kernel | Conv 5.6、DynamicQuantizeMatMul 5.0（融合後） |
+| CoreML CPUOnly | 55.3 | 40.9 ms / 415 次呼叫 | 14.0 ms / 913 個 kernel | MatMulInteger 10.8（未融合）、DynamicQuantizeLinear 1.3 |
+| CoreML CPUAndNeuralEngine | 48.9 | 37.9 ms / 415 次 | 11.8 ms | MatMulInteger 9.2 |
+| CoreML ALL | 61.4 | 47.8 ms / 415 次 | 14.6 ms | MatMulInteger 11.3 |
+
+每次 CoreML 呼叫平均約 0.1 ms，幾乎都是固定開銷（輸入輸出複製、排程），415 次就約 40 ms，比整個 CPU encoder 還久。
+
+### 純計算（`bench_asr_compute.py --threads 1 --ep ... --repeat 2`，冒煙集前 60 句）
+
+| EP（encoder） | 載入 (s) | ASR RTF | 相對 CPU | encoder mean / P90 (ms) | finalize mean / P90 (ms) | 重新解碼 (ms / 音訊 s) | footprint 載入後 / 峰值 (MB) | 峰值 RSS (MB) | token 不同（/ 60 句） |
+|---|---|---|---|---|---|---|---|---|---|
+| **CPU（基準）** | 0.8 | **0.0444** | 1.00 | **16.2 / 17.0** | **58.5 / 69.6** | **33.6** | 296 / 332 | 370 | — |
+| CoreML CPUOnly，MLProgram | 17.3 | 0.0993 | 2.24 倍慢 | 37.1 / 38.2 | 130.4 / 152.8 | 78.6 | 315 / 384 | 464 | 1 |
+| CoreML CPUAndGPU，MLProgram | 19.4 | 0.1210 | 2.73 倍慢 | 45.2 / 47.1 | 159.7 / 189.3 | 89.7 | 324 / 388 | 468 | 1 |
+| CoreML CPUAndNeuralEngine，MLProgram | 21.2 | 0.1213 | 2.73 倍慢 | 45.4 / 50.9 | 159.2 / 202.0 | 82.6 | 319 / 398 | 480 | 2 |
+| CoreML ALL，MLProgram | 20.4 | 0.1125 | 2.53 倍慢 | 42.1 / 43.7 | 148.1 / 173.7 | 81.7 | 311 / 392 | 474 | 2 |
+| CoreML CPUOnly，NeuralNetwork | 5.9 | 0.1021 | 2.30 倍慢 | 38.2 / 39.3 | 134.1 / 156.8 | 74.5 | 394 / 465 | 516 | 4 |
+| CoreML CPUAndGPU，NeuralNetwork | 6.3 | 0.1494 | 3.36 倍慢 | 56.2 / 58.5 | 196.4 / 228.3 | 107.2 | 468 / 571 | 576 | 2 |
+| CoreML CPUAndNeuralEngine，NeuralNetwork | 9.4 | 0.1273 | 2.87 倍慢 | 47.8 / 52.6 | 167.3 / 198.5 | 91.0 | 388 / 472 | 524 | 3 |
+| CoreML ALL，NeuralNetwork | 9.1 | 0.1331 | 3.00 倍慢 | 50.0 / 55.1 | 175.4 / 221.0 | 120.9 | 388 / 473 | 525 | 3 |
+
+- **沒有任何組合比 CPU 快**：encoder 每 chunk 慢 2.3–3.5 倍，finalize（停頓時產生暫定結果）多 72–138 ms，這些都會直接加在結果延遲上。CPUOnly 最不慢，表示 GPU / ANE 本身沒帶來收益，時間都花在切段的往返上。
+- 每個設定兩輪的 token 都相同（可重現）；token 雜湊顯示 CPUOnly 與 CPUAndGPU 結果相同、CPUAndNeuralEngine 與 ALL 相同（ALL 實際把能上 ANE 的段放在 ANE）。
+- **載入要編譯 Core ML 模型**：MLProgram 17–21 s、NeuralNetwork 6–9 s（CPU 0.8 s）。給 `ModelCacheDirectory` 後第二次載入降到 3.7 s（CPUAndNeuralEngine，快取 21 MB），仍是 CPU 的 4–5 倍。
+- 記憶體：footprint 峰值多 50–240 MB、峰值 RSS 多 94–206 MB（Core ML 模型與每段的輸入輸出緩衝）。
+
+### 全鏈路（`run_eval.py --smoke`，200 句，`--jobs 1`，A2 預設設定）
+
+| 模型 | CER | 95% CI（以句） | RTF | 首字 mean / P90 (ms) | 暫定結果產生 / 恢復時重新解碼 mean (ms) | 峰值 RSS (MB) | 最終文字與 CPU 不同 | 這些句子的錯字數變化 |
+|---|---|---|---|---|---|---|---|---|
+| `x-asr-480ms-int8-ort`（CPU） | 4.80% | [3.76, 5.93] | **0.0369** | 1008 / 1034 | **53 / 88** | 354 | — | — |
+| `…-coreml-cpu` | 4.67% | [3.63, 5.80] | 0.0727（1.97 倍） | 1023 / 1048 | 107 / 185 | 449 | 9 句 | 5 句變好、2 句變差，合計 −4 |
+| `…-coreml-gpu` | 4.67% | [3.63, 5.80] | 0.0856（2.32 倍） | 1029 / 1058 | 126 / 220 | 457 | 9 句（與 cpu 相同） | 同上 |
+| `…-coreml-ane` | 4.73% | [3.70, 5.87] | 0.0802（2.17 倍） | 1024 / 1051 | 118 / 208 | 412 | 7 句 | 3 好、1 差，合計 −2 |
+| `…-coreml-all` | 4.73% | [3.70, 5.87] | 0.0769（2.08 倍） | 1023 / 1049 | 113 / 199 | 464 | 7 句（與 ane 相同） | 同上 |
+
+- CER 差異（−0.07 至 −0.13 個百分點）遠在信賴區間（約 ±1 個百分點）內，**不能解讀為變準**；結果改變的原因是非量化部分改在 Core ML 以不同的浮點精度 / 累加順序計算。差異集中在人名、同音字（例：周云路 → 周云露、首饰 → 熟食）。
+- 首字延遲只多 15–21 ms：首字主要卡在模型輸出延遲（B1），計算只佔一小部分；但 RTF 約 2 倍，A2 停頓時產生暫定結果的計算 53 → 107–126 ms、恢復說話時的重新解碼 88 → 185–220 ms，都直接加在結果延遲上。
+
+### 附帶發現：CPU 上固定 N = 1
+
+只在 CPU 上給 `add_free_dimension_override_by_name("N", 1)`（隨機輸入 40 個 chunk × 6 輪交錯）：encoder 每 chunk 19.8 → 18.5 ms（約 −7%，常數摺疊後節點變少），但輸出**不逐位元相同**（40 個 chunk 串接狀態後 encoder_out 最多差 0.23），推測是融合 / 量化路徑改變。沒有採用；要用的話需在 200 / 300 句上確認 CER 與逐句差異。
+
+### 結論
+
+- **onnxruntime CoreML EP 不能加速官方 INT8 的 X-ASR**：任何 compute units × 格式都比 CPU 慢 2–3.4 倍（純計算）、全鏈路 RTF 約 2 倍，載入多 3–20 s、記憶體多約 100 MB。CER 沒有顯著變化。預設維持 CPU。
+- 主要障礙是**模型的量化格式**：官方 INT8 是 ONNX 的動態量化（`DynamicQuantizeLinear` + `MatMulInteger`），Core ML 沒有對應運算，每個線性層都被切回 CPU，encoder 被切成 415 段；每段往返約 0.1 ms 的固定開銷，總開銷超過整個 CPU encoder。其次是符號批次維度讓形狀推不出（已用固定 N 解決）。
+- 也就是說「官方 INT8 + Core ML」這條路，用 ORT CoreML EP 走不通；要讓 encoder 整段（或少數幾段）落在 Core ML，矩陣乘法必須以 Core ML 支援的形式表達。
+
+### 下一步選項（只評估，未下載）
+
+官方 Hugging Face repo（GilgameshWind/X-ASR-zh-en，只看了檔案清單）另有 `deployment/models/chunk-480ms-model/encoder-480ms.onnx`（FP32，593 MB）、joiner 10 MB、decoder 11 MB，以及 `streaming_exp/pretrained.pt`（2.56 GB，PyTorch checkpoint）。本機目前沒有 `onnx`、`coremltools`、`torch`。
+
+| 選項 | 做法 | 需要下載 | 預期 / 風險 |
+|---|---|---|---|
+| A. 改寫官方 INT8 ONNX（建議先做） | 用 `onnx` 把每組 `DynamicQuantizeLinear + MatMulInteger (+ Mul/Add)` 換成 `MatMul`，權重以 INT8 × scale 反量化成 FP16 / FP32 常數（只用官方 INT8 權重，不自行量化），再接 ORT CoreML EP（N 固定為 1） | `onnx` 套件（wheel 約 15–20 MB） | 量化運算消失後只剩 Log / Equal / Expand 等少量不支援（約 280 個節點，可能多半能常數摺疊或改寫），partition 可望降到個位數；權重變 FP16 約 300 MB（Core ML 內），比 INT8 的 155 MB 大。數值上是「INT8 權重 + 浮點啟動值」，與官方 INT8（動態量化啟動值）不同，CER 要重量 |
+| B. coremltools 直接轉 | coremltools 7 起已移除 ONNX 前端，只能從 PyTorch（`torch.jit.trace` / `torch.export`）轉；需 icefall 的 X-ASR zipformer2 程式碼、串流狀態的輸入輸出自己包；轉出後可用 coremltools 的權重量化（W8 / palettization）在 ANE 上跑 | `pretrained.pt` 2.56 GB + torch（約 200–300 MB）+ coremltools（約 10 MB）+ X-ASR repo 程式碼 | 最接近第三階段（iOS + Core ML）的最終形態，也最能用到 ANE；工作量最大（zipformer2 串流版轉 Core ML 社群少有現成腳本），且 2.56 GB checkpoint 可能含優化器狀態 |
+| C. 用 FP32 ONNX 接 CoreML EP | 下載 `encoder-480ms.onnx` 直接跑 | 593 MB + 21 MB | 與 A 的效果類似但權重不是官方 INT8；屬於使用者已排除的「FP32 參照」範疇，不建議 |
+
+建議：先做 A（小下載、可在現有評測框架內 1–2 天驗證 partition 數與加速比）；若 A 證明整段 encoder 在 ANE 上能明顯快於 CPU，再投入 B 為 iOS 做正式的 Core ML 模型。

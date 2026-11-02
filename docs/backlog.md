@@ -125,6 +125,12 @@
 - **2026-11-01 已處理**：(1) X-ASR / SenseVoice 改用 onnxruntime 1.31.1 直接推論並設為預設（`x-asr-480ms-int8-ort`），200 句峰值 RSS 541 → 353 MB，結果與 sherpa-onnx 版逐句相同；(2) 評測峰值 RSS 隨句數上升已查明是推論暖機（malloc 碎片、程式碼分頁），改以最長 20 句暖機（分支 `feat/b11-eval-rss`，未合併）。**剩下**：模型體積 163.6 MB，留到第二階段 Core ML；輕量備選 small CTC（27 MB、RSS 約 183 MB，CER 約 2 倍）在分支 `feat/light-ctc`。
 - **原做法**：(1) 等 sherpa-onnx 改用 ORT ≥ 1.30，或自行以較新的 ORT 編譯 sherpa-onnx，再用 `probe_memory.py` 對比；iOS 端以 phys_footprint（jetsam 依據）而非 RSS 為準；(2) 在 worker 中每 N 句取樣 RSS，找出評測端的增長來源並修正，讓峰值 RSS 與句數無關；(3) 第二階段量化與 Core ML 轉換時一併對比記憶體與體積。
 
+### B14　Core ML 加速 encoder（P1，第二階段）
+
+- **現況（2026-11-02，progress.md）**：onnxruntime 1.31.1 內建的 CoreML EP 跑官方 INT8 的 X-ASR 480 ms，所有 compute units（CPUOnly / CPUAndGPU / CPUAndNeuralEngine / ALL）× 格式（MLProgram / NeuralNetwork）都比 CPU 慢 2–3.4 倍，載入多 3–20 s（編譯 Core ML 模型），CER 無顯著變化。原因：Core ML 不支援 ONNX 動態量化的 `DynamicQuantizeLinear` / `MatMulInteger`，encoder 被切成 415 段，每段往返約 0.1 ms。可用 `x-asr-480ms-int8-ort-coreml-{cpu,gpu,ane,all}` 與 `bench_asr_compute.py --ep` 重現。
+- **做法**：(A，建議先做) 用 `onnx` 把官方 INT8 encoder 的量化矩陣乘法改寫成以官方 INT8 權重反量化的浮點 `MatMul`，再接 CoreML EP，看 partition 數與 ANE 加速比（需下載 `onnx`，先問使用者）；(B) 若 A 有效，再從 PyTorch checkpoint（2.56 GB）經 coremltools 轉正式的 Core ML 模型給 iOS 用。
+- **完成標準**：encoder 在 Core ML（ANE 或 GPU）上比 CPU 快，200 / 300 句 CER 與 CPU 版差異在信賴區間內，記錄載入時間與記憶體。
+
 ---
 
 ## 工程
