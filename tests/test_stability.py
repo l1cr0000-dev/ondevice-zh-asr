@@ -49,6 +49,8 @@ def test_whole_sentence_rewrite() -> None:
     s = _stab(_seg([(1.0, "北京"), (1.5, "背景音乐")], (2.0, "北京音乐")))
     # 北京 → 背景音乐：改 2 字；背景音乐 → 北京音乐：改 4 字（共同前綴 0）
     assert s.unstable == 2 and s.revised_tokens == 6
+    # 對齊口徑：北京 → 背景音乐 換掉 2 字；背景音乐 → 北京音乐 只換 2 字（音乐保留）
+    assert s.revised_tokens_aligned == 4
     # 「北」「京」1.0 s 出現，1.5 s 被改，2.0 s 才穩定；「音」「乐」1.5 s 出現、2.0 s 穩定
     assert s.stable_delay_s == pytest.approx([1.0, 1.0, 0.5, 0.5])
 
@@ -56,6 +58,11 @@ def test_whole_sentence_rewrite() -> None:
 def test_punctuation_and_script_changes_are_not_revisions() -> None:
     s = _stab(_seg([(1.0, "今天"), (1.5, "今天，")], (2.0, "今天。天氣")))
     assert s.updates == 2 and s.unstable == 0
+
+
+def test_middle_char_changed_aligned_counts_one() -> None:
+    s = _stab(_seg([(1.0, "背后意义静止是不")], (2.0, "背后意义竟止是不")))
+    assert s.revised_tokens == 4 and s.revised_tokens_aligned == 1
 
 
 def test_deletion_counts_as_revision() -> None:
@@ -96,6 +103,7 @@ def test_summary() -> None:
     assert st["unstable_update_rate"] == pytest.approx(2 / 3)
     assert st["revised_tokens"] == 6
     assert st["revised_token_ratio"] == pytest.approx(6 / 8)
+    assert st["revised_token_ratio_aligned"] == pytest.approx(4 / 8)
     assert st["utterances_with_revision"] == pytest.approx(0.5)
     assert st["stable_on_first_ratio"] == pytest.approx(4 / 8)
     # 舊結果沒有逐次 partial 紀錄

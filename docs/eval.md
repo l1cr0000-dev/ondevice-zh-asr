@@ -164,6 +164,30 @@ VAD 起點首字延遲的細節：
 
 連續多句集另有 `segmentation.result_latency_ms_by_pause`：每句真實末字結束 → 第一個涵蓋整句的結果（暫定結果的 `audio_end_s` 不早於末字結束，或最終結果，取早者）。最終文字與同 min_silence 不開暫定結果時相同，CER 與斷句指標也相同。
 
+### partial 穩定度（`metrics.stability`）
+
+量化畫面上的文字跳動，程式在 `eval/stability.py`。結果 JSON 每個句段記錄每次 partial 變化的 `partials`（`emitted_s`、`text`），2026-11-02 以前的結果沒有這個欄位，`stability` 為 `null`。
+
+**顯示文字的口徑**：每個句段依時間合成「畫面上的文字序列」——partial、暫定結果、最終結果每次發出都取代畫面上這句的文字（同一時刻依 partial → 暫定結果 → 最終結果），與偽串流比較的「可見首字」口徑一致。文字先經 CER 的同一套正規化（`tokenize`：去標點、繁轉簡、中文按字），標點的增減不算跳動；正規化後與上一次相同的事件略過。已定稿的句段不再變，所以逐句段計算、按條（wav）彙總。
+
+| 欄位 | 定義 |
+|---|---|
+| `unstable_update_rate` | 修正次數 / 顯示更新次數。相鄰兩次顯示 A → B，A 不是 B 的前綴（A 已顯示的字有被改掉或刪掉）= 修正；只往後追加不算。第一次出現（空 → 第一個字）不算更新 |
+| `revised_tokens_per_utterance` | 每條被改掉或刪掉的字數（每次修正 = len(A) − A 與 B 的共同前綴長度，加總），mean / P90 |
+| `revised_token_ratio` | 全部被改掉的字數 / 全部最終字數（語料級）。「每顯示 100 個最終字，畫面上有幾個字被改過」 |
+| `revised_token_ratio_aligned` | 同上，但每次修正改以最長共同子序列對齊：len(A) − LCS(A, B)，只算真的被換掉或刪掉的字（句中改一字，後面的字不算）。共同前綴口徑是上界、對齊口徑是下界 |
+| `utterances_with_revision` | 至少有一次修正的條數比例 |
+| `displays_per_utterance` | 每條畫面文字改變的次數（含第一次出現） |
+| `stable_delay_ms` | **前綴穩定延遲**：最終文字的第 i 個字，穩定時刻 = 從這次顯示起、之後每次顯示的前 i+1 個字都等於最終文字前 i+1 個字的最早時刻；延遲 = 穩定時刻 − 畫面上第一次有第 i 個位置（任何字）的時刻。全部字一起算分位數 |
+| `stable_on_first_ratio` | 前綴穩定延遲 = 0 的字的比例（一出現就是對的、之後沒被動過） |
+| `by_replaced_kind` | 依被取代的文字是 partial 還是暫定結果，分別列被取代次數、其中修正的次數與比例、被改掉的字數。A2 暫定結果在說話恢復後被改了多少看 `provisional` 這一列 |
+
+說明：
+
+- 修正以**共同前綴**定義（對應串流 ASR 文獻的 unstable partial rate / unstable token rate，例如 Shangguan et al., Interspeech 2020「Analyzing the Quality and Stability of a Streaming End-to-End On-Device Speech Recognizer」；Google Cloud Speech 串流結果的 `stability` 是模型自估的「不會再變」機率，不是事後量測），因為使用者感受到的是「已出現的字被改」；中間改一個字，後面的字也算被改（畫面上它們會重畫），所以被改掉的字數是上界。
+- 前綴穩定延遲的起點是「第一次在這個位置出字」，不是語音時刻；一個字出現時就對、但後來被改掉又改回來，延遲從第一次出現算起。
+- 偽串流（SenseVoice 每隔一段整段重新辨識）的 partial 次數與間隔由排程決定，不同排程的「修正率」分母不同，比較時同時看被改掉的字數比例。
+
 ### 峰值記憶體
 
 子程序結束前的 `resource.getrusage(RUSAGE_SELF).ru_maxrss`（macOS 單位是 bytes，Linux 是 KB，程式已分別換算），單位 MB。包含 Python 直譯器與 numpy / onnxruntime 本身；另記錄模型載入前與載入後的 RSS，兩者之差約等於模型佔用。
