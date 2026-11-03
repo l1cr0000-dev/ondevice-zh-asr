@@ -31,3 +31,4 @@ __pycache__/
 
 # macOS
 .DS_Store
+third_party/*
