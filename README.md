@@ -6,7 +6,7 @@
 - 串流輸出 partial 結果，以首字延遲為核心優化目標
 - 所有結論都附可複現的量化指標（CER、RTF、首字延遲、峰值記憶體、模型大小）
 
-> 🚧 第一階段（VAD + 串流 ASR + 評測框架）已完成，下一步見[路線圖](#路線圖)。
+> 🚧 第一階段（VAD + 串流 ASR + 評測框架）與延遲優化已完成，預設模型為 SenseVoice Small 偽串流（首字約 400 ms、說完到定稿約 680 ms，200 句冒煙集）。量化精度對比暫緩，下一步是**端側適配**：在 Apple 設備上實際跑起來，見[路線圖](#路線圖)。
 
 ## 架構
 
@@ -22,7 +22,7 @@ flowchart LR
         HIST["_AudioHistory<br/>環形緩衝"]
         VAD["src.vad.StreamingVad<br/>遲滯雙閾值狀態機"]
         SIL["SileroVadModel<br/>ONNX Runtime · 32 ms frame"]
-        ASR["src.asr.AsrStream<br/>串流 transducer（onnxruntime 1.31 / sherpa-onnx）<br/>（load_asr 依名稱載入）"]
+        ASR["src.asr.AsrStream<br/>預設 SenseVoice 偽串流（定期整段重新辨識）<br/>或串流 transducer X-ASR（onnxruntime 1.31）<br/>（load_asr 依名稱載入）"]
         SIL -. 語音機率 .-> VAD
         VAD -- "start：建立 stream<br/>end：finalize" --> ASR
         HIST -- "從 VAD 起點 − pre-roll 補送" --> ASR
@@ -69,6 +69,8 @@ sequenceDiagram
 
 VAD 確認的 291 ms 被「等第一個 chunk 收滿」蓋住（pre-roll 的音訊會一次補送），換更快的推論後端幫助不大。換成 160 ms chunk 也只快約 130 ms：VAD 發出 start 事件後，模型平均還要 554 ms 才輸出第一個字，瓶頸在模型多晚出字，不在 VAD（見 [docs/progress.md](docs/progress.md) 2026-10-31）。
 
+預設的 SenseVoice 偽串流沒有「等 chunk 收滿」與模型輸出延遲的問題：VAD 發出 start 事件、補送 pre-roll 後，累積滿 0.48 s 音訊就整段辨識一次，200 句冒煙集的首字延遲（VAD 起點）mean 400 ms，比 X-ASR 快約 600 ms。代價是之後每 0.96 s 整段重算一次，partial 文字跳動較多；累積超過 3 s 就不再更新 partial，等暫定結果或定稿（車艙指令多在 3 s 內）。
+
 ## 快速開始
 
 需求：Apple Silicon Mac、[uv](https://docs.astral.sh/uv/)、網路（第一次下載模型與評測資料）。
@@ -78,12 +80,12 @@ VAD 確認的 291 ms 被「等第一個 chunk 收滿」蓋住（pre-roll 的音�
 git clone <repo-url> && cd ondevice-zh-asr   # repo 尚未公開，<repo-url> 待補
 uv sync                                   # 安裝依賴（uv 會自動下載 Python 3.11）
 uv run scripts/check_env.py               # 檢查環境：最後一行應為 OK
-bash scripts/download_models.sh           # 下載模型到 models/（解壓後約 245 MB，含 SHA-256 校驗，可重複執行）
-uv run pytest                             # 應為 84 passed、0 skipped
+bash scripts/download_models.sh           # 下載模型到 models/（5 個模型，解壓後約 640 MB，含 SHA-256 校驗，可重複執行）
+uv run pytest                             # 應為 202 passed、0 skipped
 ```
 
 `check_env.py` 列出套件版本、ONNX Runtime providers（應有 `CoreMLExecutionProvider` 與 `CPUExecutionProvider`）與麥克風；任何一項失敗都會以非零狀態碼結束。
-沒有下載模型時 pytest 不會失敗，但用到真實模型的 24 個測試會被跳過（`-rs` 可看原因）；看到 skipped 代表模型沒裝好。
+沒有下載模型時 pytest 不會失敗，但用到真實模型的測試會被跳過（`-rs` 可看原因）；看到 skipped 代表模型沒裝好。
 
 試用（不給 wav 時用內附的測試音訊；wav 需為 16 kHz）：
 
@@ -96,9 +98,6 @@ uv run scripts/demo_mic.py                # 麥克風即時辨識，Ctrl+C 結�
 ```
 
 預設的結束判定是兩段門檻（方案 A2）：句中靜音 150 ms 先 finalize 出暫定結果（標「（暫定）」），靜音滿 700 ms 才定稿（2026-11-03 起，原為 1000 ms，針對車艙短指令）；暫定結果之後若又開始說話，會重新解碼整句並修正。上面三個腳本與 `eval/run_eval.py` 都可用 `--min-silence-ms 500 --pause-ms 0` 退回舊的單一門檻 500 ms。
-
-```bash
-```
 
 第一次跑 `demo_mic.py` 時 macOS 會詢問麥克風權限；若曾拒絕，腳本會提示到「系統設定 → 隱私權與安全性 → 麥克風」開啟。
 
@@ -120,9 +119,25 @@ uv run eval/run_eval.py --smoke           # 改動後快速確認沒有改壞，
 
 ## 基準指標
 
-**預設設定：結束判定方案 A2**（pause 150 ms / min_silence 1000 ms；2026-11-01 起，pause 由 200 改為 150），相對下表的單一門檻 500 ms。下表 A2 欄是 pause 200 時量的；改為 150 後，300 句對齊集的結果延遲再降約 55 ms，0.2 s 句間停頓後的句子從約 1.3 s 降到約 230 ms，先出半句暫定結果的句子 36% → 40%，CER 不變（見 [docs/scoreboard.md](docs/scoreboard.md)）：
+**目前預設**（2026-11-03）：SenseVoice Small INT8 偽串流（`sensevoice-small-int8-ort-p480-960-max3-zh`，語言固定中文、2 執行緒）＋ 結束判定 A2（句中停頓 150 ms 出暫定結果、靜音 700 ms 定稿）。200 句冒煙集，Apple M5（Mac17,3）/ macOS 27.0.1，量測時 load average 約 2：
 
-| | 單一門檻 500 ms（舊預設） | **A2（預設）** |
+| 指標 | 數值 |
+|---|---|
+| CER [95% CI] | 3.80% [2.80, 4.89] |
+| 首字延遲（VAD 起點）mean / P90 | 400 / 404 ms |
+| 端到端首字延遲 mean / P90 | 909 / 966 ms |
+| 尾字延遲 mean（VAD 語音終點 → 定稿） | 678 ms |
+| 每條切段數 mean（max） | 1.09（3） |
+| RTF（牆鐘） | 0.032 |
+| 峰值 RSS / 模型大小 | 446 MB / 230.7 MB（約 234M 參數，INT8；含 VAD 與 tokens） |
+
+定稿門檻 1000 → 700 ms：在 ≤ 3 s 的 100 句短句子集上 CER 都是 2.49%、沒有句子被切開，尾字延遲 998 → 678 ms；冒煙集的 4–5 s 朗讀長句較常被切開，CER 3.43 → 3.80%（+0.37 個百分點，顯著）。以上只在 AISHELL-1 小集合上驗證，3000 句正式集尚未以目前預設重跑，泛化風險見 [docs/limitations.md](docs/limitations.md)；決定紀錄見 [docs/progress.md](docs/progress.md) 2026-11-02、2026-11-03。
+
+### 歷史紀錄：X-ASR 時期的基準
+
+**結束判定：方案 A2 對單一門檻**（X-ASR 480 ms；A2 當時為 pause 150 ms / min_silence 1000 ms，2026-11-01 起 pause 由 200 改為 150，2026-11-03 起 min_silence 改為 700），相對下表的單一門檻 500 ms。下表 A2 欄是 pause 200 時量的；改為 150 後，300 句對齊集的結果延遲再降約 55 ms，0.2 s 句間停頓後的句子從約 1.3 s 降到約 230 ms，先出半句暫定結果的句子 36% → 40%，CER 不變（見 [docs/scoreboard.md](docs/scoreboard.md)）：
+
+| | 單一門檻 500 ms（舊預設） | **A2** |
 |---|---|---|
 | CER，3000 句 | 4.11% | **3.75%**（成對差 −0.36 個百分點，95% CI [−0.46, −0.26]） |
 | 說完 → 完整結果（真實末字結束起算，300 句對齊集，mean / P50 / P90 ms） | 580 / 581 / 651 | **299 / 295 / 366** |
@@ -158,7 +173,9 @@ CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句、每條前補 1 �
 † 峰值 RSS 隨評測句數增加（200 句時 X-ASR 531、zh-14M 252 MB），增加的部分來自評測 / pipeline 端，不是模型推論（單獨解碼 100 → 1000 句只增加約 3 MB），原因待查，見 [backlog B11](docs/backlog.md)。不同評測集之間的峰值 RSS 不要直接比較。
 預設後端自 2026-11-01 起改為 onnxruntime 1.31.1 直接推論（`x-asr-480ms-int8-ort`），辨識結果與 sherpa-onnx 版逐句相同（200 句冒煙集），表中的 CER 與延遲不變；峰值 RSS 在 200 句冒煙集上 541 → 353 MB，3000 句未重跑。見 [docs/progress.md](docs/progress.md)。
 
-**2026-11-02 起預設模型改為 SenseVoice Small 偽串流**（`sensevoice-small-int8-ort-p480-960-max3-zh`：非串流 CTC 模型，語言固定中文，第一次在累積 0.48 s 時整段辨識出 partial，之後每 0.96 s 一次，累積超過 3 s 不再更新、等暫定結果 / 定稿；**預設 2 執行緒**，X-ASR 等其他模型維持 1，`--threads` 可覆寫）。X-ASR 保留為 `x-asr-480ms-int8-ort`。200 句冒煙集（A2 預設斷句，量測時 load average 約 2.5–3）：
+### 預設模型的選擇：SenseVoice 偽串流對 X-ASR（2026-11-02）
+
+**2026-11-02 起預設模型改為 SenseVoice Small 偽串流**（`sensevoice-small-int8-ort-p480-960-max3-zh`：非串流 CTC 模型，語言固定中文，第一次在累積 0.48 s 時整段辨識出 partial，之後每 0.96 s 一次，累積超過 3 s 不再更新、等暫定結果 / 定稿；**預設 2 執行緒**，X-ASR 等其他模型維持 1，`--threads` 可覆寫）。X-ASR 保留為 `x-asr-480ms-int8-ort`。200 句冒煙集（A2，當時 min_silence 1000 ms，量測時 load average 約 2.5–3）：
 
 | | SenseVoice 偽串流（預設：zh、2 執行緒） | SenseVoice（auto、1 執行緒） | X-ASR 480 ms（1 執行緒） |
 |---|---|---|---|
@@ -199,20 +216,22 @@ CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句、每條前補 1 �
 - **評測集太乾淨**：AISHELL-1 是安靜環境的單句朗讀，沒有長靜音與背景噪音，VAD 的誤觸發沒有被量到。連續多句的斷句另有合成集（300 句串成 77 條，句間停頓 0.2–2 s，見 [docs/eval.md](docs/eval.md)），但停頓長度是人為分檔、也沒有噪音。
 - **不是完整 test set**：3000 句佔 7176 句的 42%，論文的 AISHELL-1 CER 通常用完整集，不能逐位對照；VAD / pre-roll 掃描只在 200 句子集上做過。音訊來自第三方鏡像 `shenyunhang/AISHELL-1`，無法對官方 checksum 驗證。
 - **說話人只有 20 位**：以說話人重抽的 CER 信賴區間比以句重抽寬約 2 倍（X-ASR）到 3.6 倍（zh-14M）。
-- 尚未量多執行緒 RTF。
+- 多執行緒只量過 SenseVoice 的 2 執行緒（RTF 為牆鐘時間，CPU 用量多約 23%）。
 
 **模型**
 
 - **X-ASR 的訓練資料不明**：官方只說「約 100 萬小時開源及收集語音」，沒有資料集清單，是否含 AISHELL-1 train / test 未知；因此 4.15% 無法判定是跨領域、同領域還是有資料洩漏。授權已確認為 Apache-2.0。細節與來源見 [docs/models.md](docs/models.md)。
-- **缺少 FP32 基準**：X-ASR 用的是官方 INT8 版（FP32 encoder 566 MB），第二階段做量化對比時需另外補 FP32 參照。
+- **SenseVoice 的訓練資料與授權**：訓練資料同樣沒有公開完整清單，可能含 AISHELL；權重採 FunASR Model License，商用依據目前只有維護者在 issue 中的回覆，正式商用前需書面確認（[docs/models.md](docs/models.md)）。
+- **沒有 FP32 / FP16 精度對比**：SenseVoice 與 X-ASR 都直接用官方 INT8 權重；量化精度對比暫緩（2026-11-03 決定），INT8 相對 FP32 的精度損失未量。
 - zh-14M 依 sherpa-onnx 文件只用 WenetSpeech 訓練，在 AISHELL-1 上是跨領域，CER 偏高。
 
 **系統**
 
-- **首字延遲約 1 秒**（VAD 起點），計算每個 chunk 約 13 ms，換 Core ML / ANE 無法改善。換 160 ms chunk 只快約 130 ms 且 CER 顯著變差：瓶頸是模型多晚輸出第一個字：字級對齊顯示模型在首字唸完約 190 ms 後才輸出它（見 [docs/latency-analysis.md](docs/latency-analysis.md)）。
-- **結束判定用兩段門檻（A2）緩解，但沒有根治**：單一靜音門檻無法同時切對句中停頓與句間停頓（500 ms 時 15% 的單句音訊被切成多段；1000 ms 則短於門檻的句間停頓會讓兩句合併，前一句的最終結果要等下一句說完）。預設的 A2 在停頓 200 ms 時先給暫定結果、1000 ms 才定稿，使用者約 300 ms 就看到結果，代價是 35% 的句子先出現半句暫定結果再被修正、RTF 0.027 → 0.033；短於 0.3 s 的句間停頓仍會被合併（停頓 0.2 s 的句子平均約 1.3 s 才看到完整結果）。早 finalize 偶爾漏句尾的字，CER 比不早 finalize 的方案 A 高 0.05 個百分點。見 [docs/scoreboard.md](docs/scoreboard.md)。
+- **X-ASR 的首字延遲約 1 秒**（VAD 起點），計算每個 chunk 約 13 ms，換 Core ML / ANE 無法改善。換 160 ms chunk 只快約 130 ms 且 CER 顯著變差：瓶頸是模型多晚輸出第一個字：字級對齊顯示模型在首字唸完約 190 ms 後才輸出它（見 [docs/latency-analysis.md](docs/latency-analysis.md)）。
+- **結束判定用兩段門檻（A2）緩解，但沒有根治**：單一靜音門檻無法同時切對句中停頓與句間停頓（500 ms 時 15% 的單句音訊被切成多段；1000 ms 則短於門檻的句間停頓會讓兩句合併，前一句的最終結果要等下一句說完）。A2 在句中停頓時先給暫定結果、靜音滿門檻才定稿（本段數字是 X-ASR 時期以 200 / 1000 ms 量的；目前預設 150 / 700 ms），使用者約 300 ms 就看到結果，代價是 35% 的句子先出現半句暫定結果再被修正、RTF 0.027 → 0.033；短於 0.3 s 的句間停頓仍會被合併（停頓 0.2 s 的句子平均約 1.3 s 才看到完整結果）。早 finalize 偶爾漏句尾的字，CER 比不早 finalize 的方案 A 高 0.05 個百分點。見 [docs/scoreboard.md](docs/scoreboard.md)。
 - **記憶體偏重**：X-ASR 載入後 RSS 比載入前多約 435 MB，遠大於模型檔 164 MB。關掉 ONNX Runtime 的 CPU memory arena 沒有效果（載入與峰值都在 ±1 MB 內），增加發生在載入階段而非推論；多出的部分是 sherpa-onnx 2.0.1 內附的 ONNX Runtime 1.28.2 在載入時留下約 180–190 MB 已釋放但未歸還的 malloc 記憶體（碎片），不是權重存了兩份；ORT 1.30.0 起沒有這個現象。預設已改用不經 sherpa-onnx 的 onnxruntime 1.31.1 後端，評測峰值 RSS 約少 190 MB、footprint 載入峰值 426 → 274 MB。見 [docs/progress.md](docs/progress.md)。
-- 目前只跑 CPU；只在 macOS 驗證過。
+- **SenseVoice 偽串流的代價**：partial 每次整段重新辨識，文字跳動是 X-ASR 的 2–5 倍，每次計算量隨句長增加；超過 3 s 的句子之後只能等暫定結果或定稿。峰值 RSS 約 446 MB（200 句冒煙集），比 X-ASR 多約 90 MB。
+- 目前只跑 CPU；只在 macOS（Apple M5）驗證過，還沒在 iPhone / iPad 上跑過。
 
 完整清單與優先順序見 [docs/backlog.md](docs/backlog.md)。
 
@@ -223,12 +242,12 @@ src/audio.py   取樣率與讀 wav（全專案共用）
 src/paths.py   repo 與 models/ 目錄
 src/cli.py     腳本共用的命令列參數
 src/vad/       語音活動偵測（Silero VAD 狀態機）
-src/asr/       串流語音辨識（介面 + onnxruntime / sherpa-onnx 後端 + 模型註冊表）
+src/asr/       語音辨識（介面 + SenseVoice 偽串流 / 串流 transducer 後端、CTC 熱詞解碼、模型註冊表）
 src/pipeline/  串接音訊輸入、VAD、ASR
 eval/          評測（CER / RTF / 延遲 / 記憶體）
 scripts/       一條命令可執行的入口腳本
 tests/         單元與整合測試（fixtures/ 是唯一放 wav 的地方）
-docs/          設計與實驗紀錄（progress.md）、評測說明（eval.md）、問題與待辦（backlog.md）
+docs/          設計與實驗紀錄（progress.md）、評測說明（eval.md）、問題與待辦（backlog.md）、泛化局限（limitations.md）
 models/ data/  模型與資料（不進版控，由 scripts/ 下載並校驗）
 ```
 
@@ -237,33 +256,29 @@ models/ data/  模型與資料（不進版控，由 scripts/ 下載並校驗）
 **第一階段：VAD + 串流 ASR + 評測** ✅
 - [x] 模型下載腳本（含 checksum 校驗）
 - [x] VAD 模組、串流 ASR 模組
-- [x] pipeline：wav 輸入、麥克風輸入（每句時間戳；麥克風的真實端到端延遲尚未與模擬值對比）
+- [x] pipeline：wav 輸入、麥克風輸入（每句時間戳；麥克風軟體路徑的實測延遲與模擬值差 < 25 ms）
 - [x] 評測：CER、RTF、首字延遲、峰值記憶體、模型大小、VAD 切段數
 - [x] VAD `min_silence_ms` / pre-roll 參數掃描，基準指標寫入 README
 
-以下每一步都以上方基準表為對照，在同一評測集、同一設定下報告前後對比；指標變差也照實記錄。
+**延遲優化與模型選型** ✅（2026-10-31 ～ 11-03，數字見 [docs/progress.md](docs/progress.md)）
+- [x] 推論後端：onnxruntime 1.31.1 直接推論（X-ASR 峰值 RSS 541 → 353 MB）、greedy search 批次 joiner
+- [x] 結束判定 A2：句中停頓 150 ms 出暫定結果，靜音 700 ms 定稿
+- [x] 模型比較：zipformer-zh-14M、X-ASR 160 / 480 ms、SenseVoice Small；預設改為 SenseVoice 偽串流（200 句：首字 1006 → 400 ms、CER 4.80 → 3.43%）
+- [x] SenseVoice 調校：語言固定中文、partial 排程、2 執行緒、關掉執行緒空轉等待
+- [x] SenseVoice 熱詞（CTC prefix beam search + Aho-Corasick，預設關閉）
+- [x] 評測補強：MFA 真實語音起點（300 句對齊集）、連續多句合成集、partial 穩定度、麥克風路徑實測延遲
 
-**第二階段：量化**
-- [ ] 補 X-ASR FP32 參照，與官方 INT8 版對比
-- [ ] 自行做 INT8（動態 / 靜態校準）與 FP16，記錄每種精度的 CER、RTF、峰值 RSS、模型大小
-- [ ] 完成標準：精度對比表，CER 差異附成對 bootstrap 信賴區間；選出端側預設精度（目標：CER 相對 FP32 上升不顯著，模型大小與記憶體明顯下降）
+**下一步：端側適配**（目標：在使用者自己的 Apple 設備上實際跑起來）
+- [ ] 確認目標設備與形式（Mac 原生 app / iPhone / iPad）
+- [ ] 推論後端：先用 onnxruntime（Apple 平台版，CPU）讓 Silero VAD + SenseVoice 跑通；再評估 Core ML（SenseVoice 輸入長度可變，需固定或列舉輸入形狀；partial 最長 3 s 有助於限制形狀）
+- [ ] Swift 端：AVAudioEngine 收音 → VAD 狀態機 → 偽串流 ASR，邏輯與 Python 版一致；以 `tests/fixtures` 的音訊確認輸出與 Python 版相同
+- [ ] 裝置端量測：首字 / 尾字延遲（牆鐘）、RTF、峰值記憶體、載入時間、App 大小，與 Mac 模擬值對比
+- [ ] 完成標準：在目標設備上即時辨識車艙指令，指標表附機型與系統版本
 
-**第三階段：Core ML**
-- [ ] Silero VAD 與 Zipformer encoder / decoder / joiner 轉 Core ML，保持「逐 chunk 送入」的介面（實作 `FrameClassifier` / `StreamingAsr`）
-- [ ] CPU / GPU / ANE 三種 compute unit 對比：每 chunk 計算時間、RTF、載入時間、峰值記憶體
-- [ ] 完成標準：與 ONNX 版在評測集上辨識結果一致（或差異不顯著），並列出各 compute unit 的加速比。注意首字延遲主要是 chunk 等待，預期不會因此明顯下降
-
-**第四階段：iOS demo**
-- [ ] Swift + Core ML 即時辨識 app：AVAudioEngine 收音 → VAD 狀態機 → 串流 ASR，介面與 Python 版一致
-- [ ] 以 `tests/fixtures` 的音訊確認 Swift 版與 Python 版輸出相同
-- [ ] 完成標準：真機量測首字延遲（牆鐘）、RTF、峰值記憶體、模型大小，與 Mac 模擬值對比
-
-**第五階段：模型對比**
-- [ ] 同一評測集比較 X-ASR 160 / 480 / 960 ms、zipformer-small-ctc、multi-zh-hans 等串流模型（每個模型重新調句尾補零與 pre-roll）
-- [ ] 補評測可信度：合成長音訊集（多句串接、句尾留足靜音、混入噪音），首字延遲改用與 VAD 無關的參考起點
-- [ ] 完成標準：CER × 首字延遲 × 模型大小的取捨圖與表，依結果決定各平台的預設模型
-
-> X-ASR 160 ms 對比在 [backlog](docs/backlog.md) 中列為 P0（首字延遲降到 1 秒以下的主要手段），若時程允許可提前到第二階段之前。
+**暫緩**
+- 量化精度對比（FP32 / FP16 / 自行 INT8）：2026-11-03 決定暫緩，先用官方 INT8 權重
+- 泛化驗證：3000 句正式集、自錄車艙口語指令、公開口語 / 車載語料（算力允許時，見 [docs/limitations.md](docs/limitations.md)）
+- 噪音與垂直領域適配（真實車艙有 SSE 語音增強前端）、n-gram LM
 
 ## License
 

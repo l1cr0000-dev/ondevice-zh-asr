@@ -12,10 +12,10 @@
 ## 建議處理順序
 
 1. 新預設（SenseVoice 偽串流）的後續：閒置時重量 RTF 與延遲、商用書面確認（使用者處理）、「去 ASCII」顯示規則實作到 pipeline / demo（目前只在評測中模擬）
-2. 第二階段：**B16** Core ML（官方 INT8，不自行量化；ORT CoreML EP 不加速，下一步改寫量化矩陣乘法，需下載 `onnx`）、**B11** 模型體積
+2. **下一階段改為端側適配**（2026-11-03 使用者決定：量化精度對比暫緩，先讓 SenseVoice 偽串流在使用者的 Apple 設備上跑起來，見 README 路線圖）：先用 onnxruntime（Apple 平台版）跑通，再評估 **B16** Core ML（目標改為 SenseVoice）、**B11** 模型體積
 3. **B13** 公開前替換 macOS 系統語音產生的測試 fixture（要公開 repo 時才必要）
 4. 有空再做：B8 閒置重量執行緒、B10、B12、B15
-- SenseVoice 執行緒數：2 執行緒結果不變、說完 → 完整結果 −30~50 ms（progress.md 2026-11-02「SenseVoice 偽串流的執行緒數」，分支 `feat/sv-threads`）；改不改預設待使用者決定
+- SenseVoice 執行緒數：2 執行緒結果不變、說完 → 完整結果 −30~50 ms（progress.md 2026-11-02「SenseVoice 偽串流的執行緒數」，分支 `feat/sv-threads`）；已改為預設（2026-11-02）
 - 已告一段落：**B0** 麥克風真實延遲（軟體路徑已量測，2026-11-02，差距 < 25 ms；聲學 / 虛擬裝置回送需使用者同意，未做）、**B1** 首字延遲（推論端無可再降，主因是模型輸出延遲）、**B9** 結束判定（A2 + pause 150 為預設）、**B4 / B5** 連續多句集與 MFA 真實起點（車內噪音版在未合併分支）、**B7** 取消（不建立 FP32 參照）
 
 ---
@@ -129,7 +129,9 @@
 - **2026-11-03 SenseVoice session 選項**（分支 `feat/sv-mem-cpu`，未合併，progress.md）：arena / mem pattern / arena 擴張策略 / prepacking / 圖最佳化都無法在不付代價下降低峰值；關 arena 讓全鏈路峰值反而 +22~43 MB。關 spinning 讓 CPU −6~14%，延遲與結果不變（建議，未改預設）。要降峰值應縮短單次整段辨識的音訊長度或等 Core ML。
 - **原做法**：(1) 等 sherpa-onnx 改用 ORT ≥ 1.30，或自行以較新的 ORT 編譯 sherpa-onnx，再用 `probe_memory.py` 對比；iOS 端以 phys_footprint（jetsam 依據）而非 RSS 為準；(2) 在 worker 中每 N 句取樣 RSS，找出評測端的增長來源並修正，讓峰值 RSS 與句數無關；(3) 第二階段量化與 Core ML 轉換時一併對比記憶體與體積。
 
-### B16　Core ML 加速 encoder（P1，第二階段）
+### B16　Core ML 加速 encoder（P1，端側適配階段）
+
+- **2026-11-03**：預設模型已改為 SenseVoice，端側適配時 Core ML 的目標改為 SenseVoice（非串流、輸入長度可變，需固定或列舉輸入形狀）；下方 X-ASR 的結果保留作參考。
 
 - **現況（2026-11-02，progress.md）**：onnxruntime 1.31.1 內建的 CoreML EP 跑官方 INT8 的 X-ASR 480 ms，所有 compute units（CPUOnly / CPUAndGPU / CPUAndNeuralEngine / ALL）× 格式（MLProgram / NeuralNetwork）都比 CPU 慢 2–3.4 倍，載入多 3–20 s（編譯 Core ML 模型），CER 無顯著變化。原因：Core ML 不支援 ONNX 動態量化的 `DynamicQuantizeLinear` / `MatMulInteger`，encoder 被切成 415 段，每段往返約 0.1 ms。可用 `x-asr-480ms-int8-ort-coreml-{cpu,gpu,ane,all}` 與 `bench_asr_compute.py --ep` 重現。
 - **做法**：(A，建議先做) 用 `onnx` 把官方 INT8 encoder 的量化矩陣乘法改寫成以官方 INT8 權重反量化的浮點 `MatMul`，再接 CoreML EP，看 partition 數與 ANE 加速比（需下載 `onnx`，先問使用者）；(B) 若 A 有效，再從 PyTorch checkpoint（2.56 GB）經 coremltools 轉正式的 Core ML 模型給 iOS 用。

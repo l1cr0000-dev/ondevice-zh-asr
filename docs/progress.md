@@ -2129,3 +2129,9 @@ Apple M5（Mac17,3）、macOS 27.0.1、Python 3.11.15、onnxruntime 1.31.1；分
 短句子集上 0 句被切開、CER 相同，尾字延遲 −320 ms，與 `feat/min-silence` 的結果一致；冒煙集（4–5 s 朗讀長句）CER +0.37 個百分點（顯著）是已知代價。測試：fixture 兩句間隔 1.0 s，預設改為切成兩段（`test_end_to_end_default_splits_one_second_gap`），原本「1000 ms 合成一段、恢復時重新解碼」的測試改用明確的 1000 ms 設定保留。pytest 202 個、mypy、ruff 通過。
 
 **泛化局限**另寫成 [limitations.md](limitations.md)：所有優化都只在 AISHELL-1 小集合（朗讀語音）上驗證；定稿門檻 700 ms、VAD 觸發、模型選擇是高風險項，之後在 3000 句、自錄車艙口語指令與公開口語 / 車載語料上重驗。
+
+---
+
+## 2026-11-03　決定：量化精度對比暫緩，下一階段改為端側適配
+
+使用者決定：原第二階段的量化精度對比（FP32 / FP16 / 自行 INT8）先不做，繼續用官方 INT8 權重；下一階段改為**端側適配**，目標是在使用者自己的 Apple 設備上實際跑起來（先用 onnxruntime Apple 平台版跑通 Silero VAD + SenseVoice 偽串流，再評估 Core ML，最後做裝置端量測）。README 路線圖與「基準指標」同步改寫：最上方改列目前預設（SenseVoice + A2 150 / 700 ms）的 200 句冒煙集數字，X-ASR 時期的表格移到「歷史紀錄」。
