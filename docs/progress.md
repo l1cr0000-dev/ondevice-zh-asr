@@ -1857,3 +1857,87 @@ uv run scripts/first_partial_compare.py
 | 峰值 RSS (MB) | 441 | 443 |
 
 CER 差 +0.03 個百分點與語言一節相同（同音字互換，不顯著）。pytest 184 個、mypy、ruff 通過。依「優化階段只跑小集合」，未跑 3000 句。
+
+---
+
+## 2026-11-03　SenseVoice 偽串流的 onnxruntime session 選項：記憶體與 CPU
+
+**問題**：預設 pipeline（`sensevoice-small-int8-ort-p480-960-max3-zh`，2 執行緒）峰值 RSS 約 441 MB，推論記憶體隨音訊長度增加（約 3.8 MB / s），每次整段辨識的輸入長度都不同。ORT 的 CPU memory arena 與 mem pattern 遇到可變形狀可能多保留記憶體（X-ASR 上關 arena 無效，但它的輸入形狀固定）；2 執行緒的 CPU 時間比 1 執行緒多約 23%。有沒有 session 選項能在**不改辨識結果、不明顯變慢**的前提下降低記憶體或 CPU？
+
+**環境**：commit `7a58615` + 本節程式（分支 `feat/sv-mem-cpu`）、Apple M5、macOS 27.0.1、Python 3.11.15、onnxruntime 1.31.1、2 執行緒、語言 zh。**同機另有兩個工作階段在跑評測**：第一輪純計算掃描時 load average 4–15（數字只作篩選），候選重跑時 2–7，全鏈路評測時 2.0–3.8。
+
+**做了什麼**
+- `SenseVoiceOrtAsr` 加 `run_options` 參數（傳給 `session.run`，預設 None，行為不變），與既有的 `sess_options` 一起只供量測。
+- `scripts/bench_sv_compute.py`：session 選項預設組擴充為 11 組（`PRESETS`）——關 spinning（`session.intra_op.allow_spinning=0`）、關 arena（`enable_cpu_mem_arena`）、關 mem pattern、arena 改 kSameAsRequested（程序層級註冊 `OrtArenaCfg` 的 allocator + `session.use_env_allocators`）、每次推論後收縮 arena（run 選項 `memory.enable_memory_arena_shrinkage`）、關 prepacking、圖最佳化 basic / extended，及組合。每個設定在獨立子程序中以 vmmap 記載入前 / 載入後 / 暖機時每個長度跑完後 / 計時後的 RSS 與 physical footprint（iOS jetsam 的依據），並保留各輪峰值。
+- 新腳本 `scripts/eval_sv_session.py`：在子程序中把 `SenseVoiceOrtAsr` 換成套用預設組的版本，再呼叫 `run_eval.worker`（其餘全是 run_eval 預設），另記暖機後的程序 CPU 時間、跑完後的 footprint 與峰值、對齊集的「說完 → 完整結果」，逐句比對最終文字。「說完 → 完整結果」的算法抽成 `eval.pause.full_result_latency_s`（`pause_analysis.py cost` 改用它，輸出不變）。
+
+### 結果 (1)：純計算（整段辨識一次，1 / 2 / 3 / 5 s 各 40 段，冒煙集前綴）
+
+第一輪 11 組 × 3 輪（load 4–15，只作篩選）：
+
+| 預設組 | 5 s 辨識 mean (ms) | 5 s CPU (ms) | 載入後 footprint | footprint 峰值 | 結果與預設不同的片段 |
+|---|---|---|---|---|---|
+| default | 185 | 365 | 442 | 479 | — |
+| no-prepack | **300** | 509 | **336** | 442 | 0 |
+| opt-basic | 230 | 420 | 412 | 486 | **9 / 160** |
+| opt-extended | 196 | 385 | 420 | 459 | 0 |
+| arena-shrink | 238 | 423 | 406 | 464 | 0 |
+| no-mempattern | 209 | 402 | 403 | 470 | 0 |
+
+（其餘組見下表。這一輪「載入後」在不受選項影響的組之間也差約 20 MB，是負載造成的雜訊；下表負載低時全部組都是 347 MB。）
+
+候選 6 組 × 5 輪重跑（load 2–7，中位數；footprint 峰值附各輪值）：
+
+| 預設組 | 1 s | 2 s | 3 s | 5 s | 5 s CPU (ms) | 載入後 footprint | 暖機後 footprint（1 / 2 / 3 / 5 s） | footprint 峰值（各輪） | 結果不同 |
+|---|---|---|---|---|---|---|---|---|---|
+| default | 25.2 | 45.4 | 60.9 | 94.5 | 188 | 347 | 419 / 423 / 430 / 451 | 451（453 / 452 / 451 / 448 / 448） | — |
+| no-spin | 26.1 | 44.2 | 60.8 | 93.7 | **170（−9%）** | 347 | 419 / 423 / 430 / 451 | 451（453 / 451 / 452 / 447 / 448） | 0 |
+| no-arena | 25.4 | 45.1 | 60.7 | 94.7 | 190 | 347 | 417 / 421 / 433 / 436 | **437**（437 / 432 / 437 / 437 / 437） | 0 |
+| no-arena-no-mempattern | 25.5 | 45.3 | 60.5 | 93.4 | 187 | 347 | 416 / 421 / 432 / 436 | 436 | 0 |
+| arena-same | 25.0 | 44.6 | 59.4 | 92.5 | 183 | 347 | 417 / 425 / 436 / 441 | 441 | 0 |
+| no-spin-no-arena | 25.8 | 44.2 | 59.9 | 92.0 | **167（−11%）** | 346 | 417 / 421 / 432 / 436 | **436** | 0 |
+
+### 結果 (2)：全鏈路（run_eval 預設設定，3 輪中位數，load 2.0–3.8）
+
+| 集合 | 預設組 | CER % | RTF | CPU 秒 / 音訊秒 | 首字 mean (ms) | 暫定結果計算 mean (ms) | 說完 → 完整結果 mean / P90 (ms) | peak RSS | 跑完 footprint | footprint 峰值（各輪） | 與 default 不同的句數 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 200 句 | default | 3.43 | 0.0369 | 0.0802 | 401 | 79 | 281 / 330 | 445 | 352 | 409（409 / 410 / 408） | — |
+| | no-arena | 3.43 | 0.0370 | 0.0805 | 401 | 79 | 282 / 330 | **481** | 305 | **444**（445 / 444 / 430） | 0 / 0 / 0 |
+| | no-spin | 3.43 | 0.0390 | **0.0750（−6%）** | 403 | 83 | 285 / 333 | 444 | 351 | 408（408 / 405 / 408） | 0 / 0 / 0 |
+| | no-spin-no-arena | 3.43 | 0.0377 | 0.0721（−10%） | 402 | 80 | 284 / 333 | 477 | 306 | 440 | 0 / 0 / 0 |
+| 短句 100 | default | 2.49 | 0.0301 | 0.0679 | 402 | 62 | 247 / 316 | 414 | 333 | 378（378 / 378 / 377） | — |
+| | no-arena | 2.49 | 0.0302 | 0.0678 | 402 | 62 | 247 / 316 | **436** | 314 | **400**（400 / 396 / 400） | 0 / 0 / 0 |
+| | no-spin | 2.49 | 0.0301 | **0.0581（−14%）** | 402 | 62 | 247 / 316 | 414 | 333 | 378 | 0 / 0 / 0 |
+| | no-spin-no-arena | 2.49 | 0.0301 | 0.0581（−14%） | 402 | 62 | 247 / 315 | 432 | 311 | 396 | 0 / 0 / 0 |
+| 對齊 300 | default | 2.51 | 0.0377 | 0.0824 | 405 | 78 | 271 / 349 | 449 | 354 | 412（413 / 411 / 412） | — |
+| | no-arena | 2.51 | 0.0382 | 0.0841 | 405 | 79 | 272 / 350 | **491** | 307 | **455**（455 / 456 / 454） | 0 / 0 / 0 |
+| | no-spin | 2.51 | 0.0370 | **0.0716（−13%）** | 405 | 77 | 269 / 346 | 449 | 354 | 413 | 0 / 0 / 0 |
+| | no-spin-no-arena | 2.51 | 0.0368 | 0.0708（−14%） | 405 | 77 | 269 / 346 | 490 | 313 | 453 | 0 / 0 / 0 |
+
+CPU 秒 / 音訊秒 = 暖機後到跑完的程序 CPU 時間（user + sys，所有執行緒，含 VAD）/ 送入音訊總長；各輪 no-spin 都比 default 低（200 句 0.0752 / 0.0750 / 0.0707 vs 0.0723 / 0.0842 / 0.0802，短句與 300 句每輪低 12–16%）。載入後 RSS 各組都是 391 MB。
+
+### 結論
+
+1. **辨識結果完全不變**：除了 `opt-basic`（圖最佳化降到 basic，160 段中 9 段文字不同，且較慢），所有選項的純計算 160 段與全鏈路三個集合每一輪的最終文字都與預設逐句相同。
+2. **CPU：關 spinning 有效，而且不變慢。** 全鏈路 CPU 時間 −6~14%，RTF、首字、暫定結果計算、說完 → 完整結果都在 ±4 ms 內（短句與 300 句完全相同或略快）；純計算 5 s −9%、牆鐘不變。前一節在負載較高時量到慢 2–4%，這次負載低時看不到。
+3. **記憶體：沒有選項能降低峰值而不付代價。**
+   - **關 arena 在全鏈路上讓峰值反而上升** 22–43 MB（footprint 峰值 409 → 444、378 → 400、412 → 455，每輪一致），雖然跑完時的 footprint 低 19–47 MB、純計算（≤ 5 s 的固定長度）峰值低 15 MB。可能的原因：沒有 arena 時每次推論的暫存都直接向 malloc 要，pipeline 中 VAD 句段與暫定結果的音訊長度各不相同（最長超過 5 s），配置大小一直變，碎片與同時存活的暫存讓瞬間峰值更高；未進一步查證。jetsam 看的是峰值，所以**不建議關 arena**。
+   - arena kSameAsRequested、mem pattern 開關、每次推論後收縮 arena：純計算峰值 −0~15 MB，在雜訊邊緣，收縮 arena 還慢約 25%（篩選輪）。
+   - 關 prepacking：載入後 footprint 約 −100 MB（INT8 權重不再額外 prepack 一份），但整段辨識慢約 60%、推論後的峰值只少約 37 MB（篩選輪，負載高）。代價太大。
+   - 推論增加的約 100 MB（載入後 347 → 5 s 後 451）大部分不在 arena 的可回收範圍內。要降 SenseVoice 的峰值，方向是縮短單次整段辨識的音訊長度（例如 `partial_max_s` 之後的暫定結果 / finalize 的長度上限），或第二階段的 Core ML，而不是 session 選項。
+4. **建議設定**：SenseVoice onnxruntime 版加 `session.intra_op.allow_spinning=0`（2 執行緒時 CPU −6~14%，延遲與結果不變，記憶體不變）；arena、mem pattern、prepacking、圖最佳化都維持預設。**本分支未改預設**（任務規定），要不要改由使用者決定。車機上與其他程序共用 CPU 時，省下的 spinning 時間是實際讓給其他程序的 CPU。
+
+### 限制
+
+- 同機有其他評測在跑；全鏈路時 load 2.0–3.8 較穩，第一輪純計算篩選時 load 4–15，那輪的計時（no-prepack、arena-shrink、opt-*）只看量級。
+- 只跑小集合（200 / 100 / 300 句），沒跑連續多句集（長句段的峰值可能更受 arena 影響）。
+- 只在 M5 量；iPhone 的效能核較少、記憶體壓力不同，spinning 的 CPU 代價與 arena 行為可能不同。
+- 關 arena 讓全鏈路峰值上升的原因只是推測，沒有用 vmmap 逐句追蹤。
+- 純計算量測未含 VAD；全鏈路的 CPU 時間含 VAD（單執行緒，計算量可忽略）。
+
+重現：
+
+    uv run scripts/bench_sv_compute.py --threads 2 --preset default no-spin no-arena no-arena-no-mempattern arena-same no-spin-no-arena --repeat 5
+    uv run scripts/eval_sv_session.py --manifest data/aishell1_test_200/manifest.jsonl \
+        data/aishell1_align_300_short3/manifest.jsonl data/aishell1_align_300/manifest.jsonl \
+        --preset default no-arena no-spin no-spin-no-arena --repeat 3

@@ -1,8 +1,14 @@
 """eval/pause.py：scripts/pause_analysis.py 的計算部分。"""
 
 import numpy as np
+import pytest
 
-from eval.pause import decoded_audio_ratio, is_boundary_provisional, longest_run_below
+from eval.pause import (
+    decoded_audio_ratio,
+    full_result_latency_s,
+    is_boundary_provisional,
+    longest_run_below,
+)
 
 
 def test_longest_run_below() -> None:
@@ -28,3 +34,16 @@ def test_decoded_audio_ratio_counts_only_resumed_provisionals() -> None:
     }
     result = {"utterances": [{"duration_s": 10.0, "segments": [seg]}]}
     assert decoded_audio_ratio(result) == 1 + 2.0 / 10.0
+
+
+def test_full_result_latency_s_takes_earliest_covering_result() -> None:
+    seg = {
+        "provisionals": [
+            {"emitted_s": 2.2, "audio_end_s": 1.9},  # 半句（早於真實末字）不算
+            {"emitted_s": 2.6, "audio_end_s": 2.1},
+        ],
+        "final_s": 3.5,
+    }
+    assert full_result_latency_s({"segments": [seg]}, 2.0) == pytest.approx(0.6)
+    assert full_result_latency_s({"segments": [{**seg, "provisionals": []}]}, 2.0) == 1.5
+    assert full_result_latency_s({"segments": []}, 2.0) is None

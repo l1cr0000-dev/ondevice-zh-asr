@@ -32,6 +32,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from eval.pause import (
     decoded_audio_ratio,
+    full_result_latency_s,
     is_boundary_provisional,
     longest_run_below,
 )
@@ -89,18 +90,12 @@ def _align_cost(result: dict[str, Any], ends: dict[str, float]) -> str:
     half_utts = half = 0
     for u in result["utterances"]:
         true_end = ends[u["id"]]
-        ready: list[float] = []
-        n_half = 0
-        for seg in u["segments"]:
-            for p in seg["provisionals"]:
-                if p["audio_end_s"] >= true_end:
-                    ready.append(p["emitted_s"])
-                else:
-                    n_half += 1
-        if u["segments"] and u["segments"][-1]["final_s"] is not None:
-            ready.append(u["segments"][-1]["final_s"])
-        if ready:
-            lat.append((min(ready) - true_end) * 1000)
+        n_half = sum(
+            p["audio_end_s"] < true_end for seg in u["segments"] for p in seg["provisionals"]
+        )
+        latency = full_result_latency_s(u, true_end)
+        if latency is not None:
+            lat.append(latency * 1000)
         half += n_half
         half_utts += n_half > 0
     n = len(result["utterances"])

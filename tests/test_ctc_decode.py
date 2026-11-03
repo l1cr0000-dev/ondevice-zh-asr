@@ -3,6 +3,10 @@
 純演算法部分用人造的 log 機率，不需要模型；最後幾個測試用 SenseVoice 模型（未下載則跳過）。
 """
 
+import sys
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import numpy.typing as npt
 import pytest
@@ -205,3 +209,33 @@ def test_sense_voice_custom_sess_options(sense_voice_ort: SenseVoiceOrtAsr) -> N
     )
     audio = load_wav(TEST_WAVS / "0.wav")
     assert asr._recognize_audio(audio) == sense_voice_ort._recognize_audio(audio)
+
+
+def _bench_sv_compute() -> Any:
+    # scripts/ 不是套件；與腳本本身相同，把 scripts/ 加進 sys.path 再 import
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import bench_sv_compute
+
+    return bench_sv_compute
+
+
+def test_session_presets_build_options() -> None:
+    bench = _bench_sv_compute()
+    for name in bench.PRESETS:
+        opts, run = bench.session_options(2, name)
+        assert opts.intra_op_num_threads == 2 and opts.inter_op_num_threads == 1
+        assert (run is not None) == (name == "arena-shrink")
+    opts, _ = bench.session_options(1, "no-arena-no-mempattern")
+    assert not opts.enable_cpu_mem_arena and not opts.enable_mem_pattern
+
+
+@pytest.mark.parametrize("preset", ["no-arena", "no-mempattern", "arena-shrink"])
+def test_sense_voice_memory_presets_keep_result(
+    sense_voice_ort: SenseVoiceOrtAsr, preset: str
+) -> None:
+    # 記憶體相關的 session / run 選項不改變辨識結果（docs/progress.md「SenseVoice session 選項」）
+    opts, run = _bench_sv_compute().session_options(1, preset)
+    asr = SenseVoiceOrtAsr(sess_options=opts, run_options=run)
+    for wav in ("0.wav", "1.wav"):
+        audio = load_wav(TEST_WAVS / wav)
+        assert asr._recognize_audio(audio) == sense_voice_ort._recognize_audio(audio)

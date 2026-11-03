@@ -266,9 +266,11 @@ class SenseVoiceOrtAsr(_WholeUtteranceAsr):
         config: SenseVoiceConfig | None = None,
         models_dir: Path = MODELS_DIR,
         sess_options: Any = None,
+        run_options: Any = None,
     ):
         """`sess_options`：自訂的 `ort.SessionOptions`（量測 session 選項用，見
-        scripts/bench_sv_compute.py）；給定時 `config.num_threads` 不使用。"""
+        scripts/bench_sv_compute.py）；給定時 `config.num_threads` 不使用。
+        `run_options`：每次推論傳給 `session.run` 的 `ort.RunOptions`（同樣只供量測，None = 不給）。"""
         import kaldi_native_fbank as knf  # type: ignore[import-untyped]
         import onnxruntime as ort  # type: ignore[import-untyped]
 
@@ -290,6 +292,7 @@ class SenseVoiceOrtAsr(_WholeUtteranceAsr):
         self._session: Any = ort.InferenceSession(
             str(self._paths["model"]), opts, providers=["CPUExecutionProvider"]
         )
+        self._run_options: Any = run_options
         meta = self._session.get_modelmeta().custom_metadata_map
         self._lfr_m = int(meta["lfr_window_size"])
         self._lfr_n = int(meta["lfr_window_shift"])
@@ -345,6 +348,7 @@ class SenseVoiceOrtAsr(_WholeUtteranceAsr):
                 "language": self._language,
                 "text_norm": self._text_norm,
             },
+            self._run_options,
         )
         out: npt.NDArray[np.float32] = logits[0]
         return out
