@@ -37,3 +37,4 @@ cpp/build/
 # Swift / app 建置輸出
 .build/
 build/
+.worktrees/
