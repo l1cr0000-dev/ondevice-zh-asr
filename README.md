@@ -312,7 +312,7 @@ models/ data/  模型與資料（不進版控，由 scripts/ 下載並校驗）
 
 - [x] C++ 核心：與 Python 版逐步對齊，以 `tests/fixtures` 的音訊確認 VAD 切點、partial / 暫定 / 定稿文字與 Python 版相同；提供 C API 給 Swift / Kotlin
 - [x] Mac app（SwiftUI，按住說話為主）：AVAudioEngine 收音 → 核心 → 即時顯示 partial / 定稿；先在開發機上量延遲、RTF、記憶體，與 Python 模擬值對比
-- [x] iPhone app：共用 Mac 版的 Swift 程式碼，真機量測（iPhone 13 Pro Max，wav 模式量測；2026-11-03 使用者以麥克風按住說話實測，可正常使用，延遲數字尚未記錄）
+- [x] iPhone app：共用 Mac 版的 Swift 程式碼，真機量測（iPhone 13 Pro Max，wav 模式量測；2026-11-03 使用者以麥克風按住說話實測，可正常使用；6 句放開→定稿 0–157 ms；專有名詞會認錯，C++ 尚無熱詞）
 - [ ] Android app（Kotlin + JNI）：AudioRecord 收音 → 核心，真機量測。**暫緩**（2026-11-03）：手邊沒有 Android 設備；環境已有 Android SDK 37、模擬器映像，還缺 NDK、SDK 的 CMake、onnxruntime-android 1.31.1 AAR（Maven Central，SHA-1 `3c0fccc45f50e684c9d79a8f016f674488377223`），Gradle 首次建置需下載依賴
 - [ ] 平台加速（之後評估）：Apple 用 Core ML（SenseVoice 輸入長度可變，需固定或列舉輸入形狀；partial 最長 3 s 有助於限制形狀），Android 用 NNAPI / XNNPACK
 - [ ] 完成標準：三個平台都能即時辨識車艙指令，各自的指標表（首字 / 尾字延遲、RTF、峰值記憶體、載入時間、App 大小）附機型與系統版本
