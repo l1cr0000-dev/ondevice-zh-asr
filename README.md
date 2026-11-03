@@ -125,6 +125,20 @@ build/mac/OzAsr.app/Contents/MacOS/OzAsrMac --headless --models models tests/fix
 
 需要 Xcode 命令列工具與 `third_party/onnxruntime-osx-arm64-1.31.1`（`ORT_ROOT` 可改路徑）。與 C++ CLI 比對：見 `scripts/compare_mac_app.py` 的說明；結果與設計見 [docs/progress.md](docs/progress.md)。
 
+iPhone app（SwiftUI，重用 OzAsrKit；C++ 核心編成 iOS 靜態庫，連結 onnxruntime iOS 1.30.0 xcframework；模型 231 MB 與測試 wav 由腳本在建置時複製進 app，不進 git）：
+
+```bash
+scripts/build_ios_app.sh --simulator      # 模擬器版 → build/ios/simulator/OzAsrIOS.app（ad-hoc 簽名；先建 C++ 核心 build/ios/core/ozasr.xcframework）
+scripts/build_ios_app.sh --device         # 真機版（Team 736HS34H28 自動簽名，-allowProvisioningUpdates）→ build/ios/device/OzAsrIOS.app；bundle id 預設 com.lcrljw.ozasr，可用 --bundle-id 改
+xcrun devicectl device install app --device <UDID> build/ios/device/OzAsrIOS.app
+# 自動驗證（只跑內附 wav，不開麥克風）：啟動參數 --autorun ptt|stream，結果在 app 容器 Documents/autorun_<模式>.json
+xcrun devicectl device process launch --device <UDID> --terminate-existing com.lcrljw.ozasr --autorun ptt
+xcrun devicectl device copy from --device <UDID> --domain-type appDataContainer --domain-identifier com.lcrljw.ozasr --source Documents/autorun_ptt.json --destination /tmp/ios_ptt.json
+uv run scripts/compare_ios_app.py <Mac 或 CLI 的 jsonl> /tmp/ios_ptt.json   # 逐字比對定稿文字、列延遲
+```
+
+真機需要：iPhone 開啟「設定 → 隱私權與安全性 → 開發者模式」並重開機、用線連接且解鎖；第一次安裝後到「設定 → 一般 → VPN 與裝置管理」信任開發者憑證。免費 Personal Team 的描述檔 7 天到期。詳見 [docs/progress.md](docs/progress.md) 的 iPhone 一節。
+
 評測：
 
 ```bash
