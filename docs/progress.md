@@ -2382,3 +2382,5 @@ scripts/compare_ios_app.py      iPhone 自動驗證 JSON 與 Mac 參考輸出的
 ## 2026-11-03　決定：Android app 暫緩
 
 使用者手邊沒有 Android 設備，決定 Android app 先不做（含模擬器驗證）。已就緒：Android Studio、Android SDK platform 37、build-tools 36、platform-tools、arm64 模擬器映像 `Medium_Phone_API_37.0`、Android Studio 內附 JDK。之後恢復時還需要：NDK 與 SDK 的 CMake（Android Studio SDK Tools）、onnxruntime-android 1.31.1 AAR（Maven Central 55 MB，SHA-1 `3c0fccc45f50e684c9d79a8f016f674488377223`；使用者的終端機解析不到 `repo1.maven.org`，可改用阿里雲鏡像，下載後核對 SHA-1）、Gradle 首次建置下載的依賴（數百 MB，需使用者同意）。
+
+補充（同日）：使用者在 iPhone 13 Pro Max 上用麥克風實測「按住說話」，主觀評價「問題也不是很大」，可以正常辨識。麥克風路徑下 app 顯示的首字與放開→定稿延遲尚未記錄，之後補量。
