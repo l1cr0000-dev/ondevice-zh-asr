@@ -2354,4 +2354,25 @@ scripts/compare_ios_app.py      iPhone 自動驗證 JSON 與 Mac 參考輸出的
 ### 真機（iPhone 13 Pro Max，UDID 00008110-000A50213A61401E）
 
 - 開發者模式已開；裝置需解鎖才能建置（鎖定時 xcodebuild 逾時）。`scripts/build_ios_app.sh --device` 用 Team 736HS34H28 自動簽名成功，app 269 MB（含模型 231 MB），`devicectl device install app` 安裝成功。
-- **卡在信任憑證**：`devicectl device process launch` 回 FBSOpenApplicationErrorDomain error 3（profile 尚未被使用者信任）。需在 iPhone 上「設定 → 一般 → VPN 與裝置管理 → 開發者 App → 點選 Apple Development 帳號 → 信任」，之後重跑啟動、取回 JSON 即可。真機指標（首字、放開→定稿、RTF、峰值記憶體、載入時間）**尚未量測**。
+- 使用者信任憑證後，以自動驗證模式（`--autorun ptt` / `stream`）啟動，`devicectl device copy from` 取回 JSON，完全沒有碰麥克風。裝置 iPhone14,3，iOS 26.2；app 269 MB（模型 231 MB），onnxruntime 1.30.0。
+
+| 冒煙 15 句（wav、牆鐘即時節奏） | iPhone 13 Pro Max | Mac M5（原生，onnxruntime 1.31.1） |
+|---|---|---|
+| `stream` 定稿文字 vs `ozasr_cli` | 逐字相同（0 / 15） | — |
+| `ptt` 定稿文字 vs Mac `--ptt` | 逐字相同（0 / 15） | — |
+| 首字延遲 ptt | 均值 428 ms / 最大 476 ms | 410 / 417 ms |
+| 首字延遲 stream | 均值 413 ms / 最大 417 ms | 409 ms（見 Mac app 一節） |
+| 尾字延遲 stream | 均值 680 ms / 最大 684 ms | 680 ms |
+| 尾字延遲 ptt（音訊結束＝放開） | 均值 375 ms / 最大 595 ms | 351 / 591 ms |
+| 放開→定稿 | 均值約 0 ms（6 µs） | 約 0 ms |
+| RTF（stream / ptt） | 0.048 / 0.089 | 0.039 / 0.049 |
+| 載入時間（stream / ptt 首輪） | 0.62 / 1.18 s | 0.43 / 0.38 s |
+| 載入後 RSS | 408–411 MB | 346–351 MB |
+| 峰值 RSS | 434–437 MB | 369–379 MB |
+
+- 手機上的牆鐘首字與尾字延遲和 Mac 幾乎一樣：延遲由音訊節奏與 VAD 門檻決定，推論只佔小部分；RTF 0.048–0.089，遠低於即時。
+- 「放開→定稿」約 0：這 15 句的 ptt 模擬在語音結束瞬間放開，放開時暫定結果已就緒，量到的不是最壞情況。最壞延遲（放開時尚未出暫定結果，一次整句解碼）沒有在真機上量，要用 Mac 的 `--ptt-release-after-speech-ms` 那種截斷方式，待做。
+- ptt 的 RTF 比 stream 高、載入時間較長，是各自第一輪（冷啟動）的結果，穩態以 stream 為準。
+- 記憶體比 Mac 高約 60 MB（手機 434 MB vs Mac 369 MB），模擬器的 815 MB 不代表手機。
+- fixture（2 句）沒有在真機單獨比對；它是自動驗證清單的第 1 個檔案，只當暖機，真機上以 15 句冒煙集為準。
+- 麥克風路徑在真機上**沒有執行**，待使用者自己測。
