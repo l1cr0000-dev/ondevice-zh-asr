@@ -2308,3 +2308,46 @@ scripts/compare_mac_app.py      app --headless 與 ozasr_cli 輸出的比對
 - 後兩列的文字差異不是 bug：音訊被截到語音終點後，辨識器看到的輸入長度與尾端靜音不同，INT8 模型對此敏感（其中一句還從「二八日」變成正確的「二十八日」，一句「死霞仙子」變「死侠仙子」）。第一列音訊完全相同，文字就逐字一致。
 - 首字延遲仍約 409 ms、RTF 0.047–0.050（比連續模式的 0.039 略高，同樣因為每 10 ms 睡眠；峰值 RSS 375–380 MB）。
 - 麥克風路徑與空白鍵按放**沒有執行**（不開音訊輸入裝置）；按住期間延遲與實際收音緩衝的關係待使用者測。GUI wav 模擬按放時，檔案之間不 reset，前一檔的尾端會進下一檔的 pre-roll，所以個別句子文字可能與單檔跑（headless）不同（例：「竟只是」→「静只是」）。
+
+## 2026-11-03　iPhone app（分支 `feat/iphone-app`）
+
+C++ 核心的第二個平台前端：iPhone app（SwiftUI），重用 `OzAsrKit` 與按住說話邏輯。
+
+### 架構
+
+```
+cpp/CMakeLists.txt              新增 iOS 分支：CMAKE_SYSTEM_NAME=iOS 時只建靜態庫（libozasr.a），用 -DORT_FRAMEWORK 指向 onnxruntime.framework；macOS 建置不變
+scripts/build_ios_core.sh       建 ios-arm64（真機）與 iOS 模擬器兩個切片，libtool 併成單一 libozasr.a，包成 build/ios/core/ozasr.xcframework
+apps/ios/OzAsrIOS.xcodeproj     手寫 pbxproj（只含 UI 的 app target，本地依賴 ../shared/OzAsrKit；不需要 XcodeGen / CocoaPods）
+apps/ios/Sources/               OzAsrIOSApp、AppModel（Worker + 自動驗證）、ContentView、ModelLocator（bundle 內資料）
+apps/ios/Info.plist             含 NSMicrophoneUsageDescription；bundle id 由建置參數 OZ_BUNDLE_ID 帶入（預設 com.lcrljw.ozasr）
+scripts/build_ios_app.sh        --simulator / --device：建核心 → 暫存模型與 wav → xcodebuild
+scripts/compare_ios_app.py      iPhone 自動驗證 JSON 與 Mac 參考輸出的比對
+```
+
+- **連結**：app 以 `LIBRARY_SEARCH_PATHS` / `FRAMEWORK_SEARCH_PATHS`（依 sdk 分真機與模擬器）加 `-lozasr -framework onnxruntime -lc++`。onnxruntime iOS 的 framework 是靜態庫（48 MB archive），所以 app 本體只增加約 40 MB。
+- **打包**：`build/ios/stage/oz/{models,wavs}` 由建置腳本複製（VAD、SenseVoice INT8、tokens 共 231 MB；fixture 與 `data/aishell1_test_200` 前 15 句），Xcode 以資料夾參照打進 bundle；不進 git。
+- **OzAsrKit 調整**：`OzMicrophone` 在 iOS 上 `start()` 內設定 AVAudioSession（`.record` / `.measurement`，關掉系統語音處理）並啟用、`stop()` 停用；新增 `OzMicrophone.requestPermission`（iOS 17 用 AVAudioApplication，之前用 AVAudioSession；macOS 直接回 true）。Mac app 重新建置（`scripts/build_mac_app.sh`）與 `--headless` 仍正常。
+- **介面**：與 Mac 版一致：模式（按住說話 / 連續收音 / wav 檔）、按住說話大按鈕（觸控按住收音、放開立刻定稿）、即時 partial（暫定標「（暫定）」）、歷史句子（首字、放開→定稿或尾字延遲）、載入時間 / 峰值與目前記憶體 / RTF。wav 模式可勾「模擬按住說話」並選單檔或全部內附 wav。預設進入 wav 模式；麥克風只在使用者按「開啟麥克風」後才啟動。
+- **自動驗證**：啟動參數 `--autorun ptt|stream`（可加 `--autorun-limit N`、`--autorun-warmup N`、`--autorun-out 路徑`），只跑內附 wav（不碰麥克風）。輸出格式與 Mac `--headless` 相同（一檔一行 JSON，最後一行 summary，含機型），預設寫到 app 容器 `Documents/autorun_<模式>.json`。`ptt` = 每個 wav 一次按住、結束瞬間放開定稿；`stream` = 每檔補 1 s 靜音（對照 `ozasr_cli`）。第 1 個檔案以不等待的方式暖機、不計入。
+- **onnxruntime 版本差異**：iOS 只有 1.30.0（xcframework，靜態）；Mac 用 1.31.1（動態庫）。兩邊用同一份 C++ 與同一組模型；以下 16 個 wav 的結果見下表，文字逐字相同。
+- Worker / 自動驗證邏輯目前在 iOS 與 Mac 各有一份（約 150 行重複），尚未抽進 OzAsrKit，以免動到 Mac app；列為待辦。
+
+### 模擬器驗證（iPhone 18 Pro 模擬器，iOS 27.2，跑在 Mac CPU 上；延遲不代表手機）
+
+| | fixture（2 句） | 冒煙 15 句 |
+|---|---|---|
+| `stream` 定稿文字 vs `ozasr_cli` | 逐字相同（0 / 1 檔不同） | 逐字相同（0 / 15） |
+| `ptt` 定稿文字 vs Mac `--ptt` | 逐字相同 | 逐字相同（0 / 15） |
+| VAD 切點 | 相同 | 相同 |
+| 首字延遲（模擬器牆鐘） | 414 ms | 均值 408 ms（stream）/ 415 ms（ptt） |
+| 尾字延遲（stream） | 684 ms | 均值 681 ms |
+| RTF | 0.035–0.041 | 0.042（stream）/ 0.096（ptt） |
+| 載入時間 | 0.45–0.55 s | 0.47 / 0.92 s |
+| 載入後 RSS / 峰值 | 811 / 823 MB | 815 / 869 MB |
+
+- onnxruntime 1.30.0（iOS 靜態）與 1.31.1（Mac）在這 16 個檔案上沒有造成任何字不同、也沒有 VAD 切點差異。
+- 模擬器的 RSS（約 815 MB）遠高於 Mac 原生行程（約 350 MB）：模擬器行程由 iOS 模擬器環境承載，且 iOS 版 onnxruntime 建置的配置器行為不同，這個數字不能代表手機，需看真機。
+- 截圖：`docs/ios-app-simulator.png`（wav 模擬按住說話，自動驗證執行中）。
+- `ptt` 第一輪的 RTF（0.096）與載入時間（0.92 s）比之後的單檔重跑（0.041 / 0.55 s）高，原因未查（模擬器剛開機的冷啟動可能性大）；以 stream 與單檔重跑為準。
+

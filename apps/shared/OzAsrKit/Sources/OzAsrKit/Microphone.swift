@@ -4,7 +4,7 @@ import Foundation
 
 /// AVAudioEngine 麥克風收音：重採樣成 16 kHz mono float32，以 10 ms（160 樣本）chunk 回呼。
 /// 回呼在 AVAudioEngine 的音訊執行緒上；請在回呼裡只做 dispatch，不要在這裡做辨識。
-/// iOS 使用時需先設定 AVAudioSession（.playAndRecord 或 .record）；macOS 需 NSMicrophoneUsageDescription。
+/// iOS：start() 內設定 AVAudioSession（.record / .measurement）並啟用；需先 requestPermission。macOS 需 NSMicrophoneUsageDescription。
 public final class OzMicrophone {
     private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?
@@ -15,7 +15,26 @@ public final class OzMicrophone {
 
     public init() {}
 
+    /// 要求麥克風權限（iOS；macOS 由系統在第一次收音時詢問，這裡直接回 true）。回呼在任意執行緒。
+    public static func requestPermission(_ done: @escaping (Bool) -> Void) {
+        #if os(iOS)
+        if #available(iOS 17.0, *) {
+            AVAudioApplication.requestRecordPermission(completionHandler: done)
+        } else {
+            AVAudioSession.sharedInstance().requestRecordPermission(done)
+        }
+        #else
+        done(true)
+        #endif
+    }
+
     public func start(onChunk: @escaping ([Float]) -> Void) throws {
+        #if os(iOS)
+        // iOS 必須先啟用 AVAudioSession；.measurement 關掉系統的語音處理（AGC / 降噪），保持原始訊號
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.record, mode: .measurement, options: [])
+        try session.setActive(true)
+        #endif
         let input = engine.inputNode
         let inFormat = input.outputFormat(forBus: 0)
         guard inFormat.sampleRate > 0, let conv = AVAudioConverter(from: inFormat, to: target) else {
@@ -55,6 +74,9 @@ public final class OzMicrophone {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         isRunning = false
+        #if os(iOS)
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
     }
 }
 #endif

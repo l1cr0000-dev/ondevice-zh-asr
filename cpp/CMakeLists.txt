@@ -14,17 +14,30 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# macOS / Linux：ORT_ROOT 指向預編譯套件（含 include/ 與 lib/）。
+# iOS（CMAKE_SYSTEM_NAME=iOS）：ORT_FRAMEWORK 指向 xcframework 內對應切片的 onnxruntime.framework（靜態 framework，
+#   二進位本身是 .a）；只建靜態庫 libozasr.a，不建 dylib / CLI / 測試。完整流程見 scripts/build_ios_core.sh。
 set(ORT_ROOT "" CACHE PATH "onnxruntime 預編譯套件的根目錄（含 include/ 與 lib/）")
-if(NOT ORT_ROOT)
-  message(FATAL_ERROR "請以 -DORT_ROOT=<onnxruntime 套件目錄> 指定 onnxruntime")
+set(ORT_FRAMEWORK "" CACHE PATH "iOS：onnxruntime.framework 目錄（靜態）")
+if(IOS)
+  if(NOT ORT_FRAMEWORK)
+    message(FATAL_ERROR "iOS 建置請以 -DORT_FRAMEWORK=<…/onnxruntime.framework> 指定 onnxruntime")
+  endif()
+  add_library(onnxruntime_imported STATIC IMPORTED)
+  set_target_properties(onnxruntime_imported PROPERTIES
+    IMPORTED_LOCATION "${ORT_FRAMEWORK}/onnxruntime"
+    INTERFACE_INCLUDE_DIRECTORIES "${ORT_FRAMEWORK}/Headers")
+else()
+  if(NOT ORT_ROOT)
+    message(FATAL_ERROR "請以 -DORT_ROOT=<onnxruntime 套件目錄> 指定 onnxruntime")
+  endif()
+  find_library(ORT_LIB NAMES onnxruntime HINTS "${ORT_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+  get_filename_component(ORT_LIB_DIR "${ORT_LIB}" DIRECTORY)
+  add_library(onnxruntime_imported SHARED IMPORTED)
+  set_target_properties(onnxruntime_imported PROPERTIES
+    IMPORTED_LOCATION "${ORT_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${ORT_ROOT}/include")
 endif()
-find_library(ORT_LIB NAMES onnxruntime HINTS "${ORT_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
-get_filename_component(ORT_LIB_DIR "${ORT_LIB}" DIRECTORY)
-
-add_library(onnxruntime_imported SHARED IMPORTED)
-set_target_properties(onnxruntime_imported PROPERTIES
-  IMPORTED_LOCATION "${ORT_LIB}"
-  INTERFACE_INCLUDE_DIRECTORIES "${ORT_ROOT}/include")
 
 add_compile_options(-Wall -Wextra)
 
@@ -33,6 +46,14 @@ add_library(ozasr_core STATIC
 target_include_directories(ozasr_core PUBLIC src)
 target_link_libraries(ozasr_core PUBLIC onnxruntime_imported)
 set_target_properties(ozasr_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+if(IOS)
+  # iOS：C API 與核心分別是靜態庫；腳本再用 libtool 併成單一 libozasr.a（不含 onnxruntime，由 app 另外連結）
+  add_library(ozasr STATIC src/c_api.cc)
+  target_include_directories(ozasr PUBLIC include)
+  target_link_libraries(ozasr PRIVATE ozasr_core)
+  return()
+endif()
 
 # 純 C API（Swift / Kotlin JNI 用）
 add_library(ozasr SHARED src/c_api.cc)
