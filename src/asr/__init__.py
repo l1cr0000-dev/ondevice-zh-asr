@@ -192,12 +192,13 @@ _REGISTRY: dict[str, _Factory] = {
     ),
     # 語言固定為中文（-zh；其餘同上），並掃第一次 partial 的時機 0.32 / 0.40 / 0.48 s
     # （docs/progress.md 2026-11-02「SenseVoice 語言固定 zh 與第一次 partial」）。
-    # language=zh 時模型不再自行判斷語言，短音訊的第一個 partial 不會猜成英文碎片
+    # language=zh 時模型不再自行判斷語言，短音訊的第一個 partial 不會猜成英文碎片。
+    # 0.24 s 只在 VAD 提早觸發（min_speech < 250）時才有意義（B2，docs/progress.md 2026-11-03）
     **{
         f"sensevoice-small-int8-ort-p{ms}-960-max3-zh": _sense_voice(
             0.96, ort=True, first_s=ms / 1000, max_s=3.0, language="zh"
         )
-        for ms in (320, 400, 480)
+        for ms in (240, 320, 400, 480)
     },
 }
 

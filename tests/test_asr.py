@@ -403,7 +403,7 @@ def test_sense_voice_compute_stats_count_every_decode() -> None:
     assert asr.compute_stats() == {"num_decodes": 0, "decoded_audio_s": 0.0}
 
 
-@pytest.mark.parametrize("ms", [320, 400, 480])
+@pytest.mark.parametrize("ms", [240, 320, 400, 480])
 def test_sense_voice_zh_models(ms: int) -> None:
     # 語言固定 zh 的偽串流（docs/progress.md 2026-11-02「SenseVoice 語言固定 zh 與第一次 partial」）
     try:

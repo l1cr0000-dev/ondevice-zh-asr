@@ -47,7 +47,11 @@ def test_sweep_args_are_lists() -> None:
     args = _parser(sweep=True).parse_args(["--min-silence-ms", "100", "500"])
     assert args.min_silence_ms == [100, 500]
     assert args.pre_roll_ms == [PipelineConfig().pre_roll_ms]
-    assert isinstance(args.threshold, float)  # 非掃描參數維持單一值
+    assert args.threshold == [PipelineConfig().vad.threshold]
+    assert isinstance(args.speech_pad_ms, int)  # 非掃描參數維持單一值
+    args = _parser(sweep=True).parse_args(["--min-speech-ms", "250", "0", "--threshold", "0.6"])
+    assert args.min_speech_ms == [250, 0] and args.threshold == [0.6]
+    assert isinstance(_parser().parse_args([]).min_speech_ms, int)
 
 
 @pytest.mark.parametrize(
