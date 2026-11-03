@@ -63,6 +63,9 @@ class Pipeline {
   void reset();
   std::vector<PipelineEvent> accept_waveform(const float* samples, size_t n);
   std::vector<PipelineEvent> flush();
+  // 立刻結束目前句子並定稿（按住說話放開）：不等靜音門檻；若句子在停頓中則直接以暫定結果定稿。
+  // 與 flush() 不同，之後可直接繼續 accept_waveform，不需要 reset。沒有進行中的句子時回傳空。
+  std::vector<PipelineEvent> finalize_utterance();
   const std::vector<Utterance>& utterances() const { return utterances_; }
   bool in_speech() const { return stream_ != nullptr; }
 

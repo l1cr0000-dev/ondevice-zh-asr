@@ -119,8 +119,8 @@ Mac app（SwiftUI；第二階段第一個平台前端，包裝層 `apps/shared/O
 ```bash
 scripts/build_mac_app.sh                  # 一條命令：C++ 核心 → Swift → build/mac/OzAsr.app（ad-hoc 簽名，43 MB）
 scripts/build_mac_app.sh --bundle-models  # 另把模型（231 MB）放進 app（274 MB）；預設不放，開發時用 repo 的 models/
-open build/mac/OzAsr.app                  # 輸入可選 wav 檔（依實際時長以即時節奏送入）或麥克風；第一次用麥克風 macOS 會詢問權限
-build/mac/OzAsr.app/Contents/MacOS/OzAsrMac --headless --models models tests/fixtures/vad_two_utterances.wav   # 無介面：每檔一行 JSON（牆鐘延遲、RTF、RSS）
+open build/mac/OzAsr.app                  # 預設「按住說話」：開啟麥克風後按住大按鈕（或空白鍵）說話、放開立刻定稿；也可選連續收音（VAD 自動斷句）或 wav 檔（依實際時長以即時節奏送入）。第一次用麥克風 macOS 會詢問權限
+build/mac/OzAsr.app/Contents/MacOS/OzAsrMac --headless --models models tests/fixtures/vad_two_utterances.wav   # 無介面：每檔一行 JSON（牆鐘延遲、RTF、RSS）；加 --ptt 模擬按住說話並量放開→定稿延遲
 ```
 
 需要 Xcode 命令列工具與 `third_party/onnxruntime-osx-arm64-1.31.1`（`ORT_ROOT` 可改路徑）。與 C++ CLI 比對：見 `scripts/compare_mac_app.py` 的說明；結果與設計見 [docs/progress.md](docs/progress.md)。

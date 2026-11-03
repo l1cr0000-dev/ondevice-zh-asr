@@ -34,6 +34,7 @@ struct ContentView: View {
             controls
             Divider()
             liveCard
+            if model.showsTalkButton { talkButton }
             Divider()
             history
             Divider()
@@ -50,14 +51,17 @@ struct ContentView: View {
                 }
                 if model.mode == .wav {
                     PillButton(title: "選擇 wav…", enabled: !model.running) { model.chooseWavs() }
+                    PillButton(title: model.wavPushToTalk ? "✓ 模擬按住說話" : "模擬按住說話", enabled: !model.running) {
+                        model.wavPushToTalk.toggle()
+                    }
                     Text(model.wavPaths.isEmpty ? "未選擇" : model.wavPaths.map { ($0 as NSString).lastPathComponent }.joined(separator: "、"))
                         .lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if model.running {
-                    PillButton(title: "停止") { model.stop() }
+                    PillButton(title: model.mode == .wav ? "停止" : "關閉麥克風") { model.stop() }
                 } else {
-                    PillButton(title: "開始", prominent: true) { model.start() }
+                    PillButton(title: model.mode == .wav ? "開始" : "開啟麥克風", prominent: true) { model.start() }
                 }
             }
             HStack {
@@ -86,6 +90,8 @@ struct ContentView: View {
                     }
                 } else if let last = model.utterances.last {
                     Text(last.text).foregroundStyle(.primary)
+                } else if model.mode == .pushToTalk && model.running {
+                    Text("按住說話").foregroundStyle(.tertiary)
                 } else {
                     Text(" ")
                 }
@@ -94,6 +100,23 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading)
         }
         .padding(12)
+    }
+
+    /// 大按鈕：按住收音、放開立刻定稿；滑鼠 / 觸控按住（iPhone 同一個手勢）或空白鍵
+    private var talkButton: some View {
+        let on = model.holding
+        let usable = model.mode == .pushToTalk && model.running
+        return Text(on ? "放開結束" : (model.mode == .wav ? "按住說話（wav 模擬）" : (usable ? "按住說話　（空白鍵）" : "先開啟麥克風")))
+            .font(.system(size: 22, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, minHeight: 78)
+            .background(RoundedRectangle(cornerRadius: 14).fill(on ? Color.red : (usable || model.mode == .wav ? Color.accentColor : Color.gray)))
+            .padding(.horizontal, 12).padding(.bottom, 12)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in model.pressStart() }
+                    .onEnded { _ in model.pressEnd() })
     }
 
     private var history: some View {
@@ -109,6 +132,7 @@ struct ContentView: View {
                         HStack(spacing: 14) {
                             Text("首字 \(fmt(u.firstTokenLatency))")
                             Text("尾字 \(fmt(u.finalLatency))")
+                            if let r = u.releaseToFinalLatency { Text("放開→定稿 \(fmt(r))") }
                             if let s = u.speechEnd {
                                 Text(String(format: "語音 %.2f–%.2f s", u.speechStart, s))
                             }

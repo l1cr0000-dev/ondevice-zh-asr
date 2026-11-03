@@ -81,6 +81,14 @@ std::vector<PipelineEvent> Pipeline::flush() {
   return events;
 }
 
+std::vector<PipelineEvent> Pipeline::finalize_utterance() {
+  begin_call(std::max(now_, static_cast<double>(received_) / kSampleRate));
+  std::vector<PipelineEvent> events;
+  handle(vad_.force_end(), events);
+  end_call();
+  return events;
+}
+
 void Pipeline::handle(const std::vector<VadEvent>& vad_events, std::vector<PipelineEvent>& out) {
   for (const VadEvent& ev : vad_events) {
     switch (ev.kind) {

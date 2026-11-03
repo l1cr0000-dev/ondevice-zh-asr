@@ -144,6 +144,16 @@ public final class OzAsrRecognizer {
         return try drain(wall: wall)
     }
 
+    /// 立刻結束目前句子並定稿（按住說話放開）：不等 700 ms 靜音；之後可直接繼續送入，不需要 reset。
+    public func finalizeUtterance() throws -> [OzAsrEvent] {
+        let t0 = OzClock.now()
+        let st = ozasr_finalize_utterance(handle)
+        let wall = OzClock.now()
+        computeSeconds += wall - t0
+        try check(st)
+        return try drain(wall: wall)
+    }
+
     public func reset() throws {
         try check(ozasr_reset(handle))
         computeSeconds = 0

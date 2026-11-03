@@ -1,12 +1,13 @@
 import AVFoundation
 import AppKit
-import SwiftUI
 import Foundation
 import OzAsrKit
+import SwiftUI
 
 enum InputMode: String, CaseIterable, Identifiable {
+    case pushToTalk = "按住說話"
+    case continuous = "連續收音"
     case wav = "wav 檔"
-    case microphone = "麥克風"
     var id: String { rawValue }
 }
 
@@ -18,12 +19,184 @@ final class StopFlag: @unchecked Sendable {
     func set() { lock.lock(); value = true; lock.unlock() }
 }
 
+/// 辨識工作執行緒：recognizer、session、tracker 都只在 `queue` 上存取（C 核心非執行緒安全）。
+final class Worker: @unchecked Sendable {
+    let queue = DispatchQueue(label: "ozasr.engine", qos: .userInitiated)
+    var recognizer: OzAsrRecognizer?
+    private var session: OzPushToTalkSession?
+    private var tracker: OzUtteranceTracker?
+    private var mic: OzMicrophone?
+    private var micStarted = false
+    private var stopFlag = StopFlag()
+
+    var onUtterances: (([OzUtterance]) -> Void)?
+    var onLoaded: ((Double) -> Void)?
+    var onStatus: ((String) -> Void)?
+    var onHolding: ((Bool) -> Void)?
+    var onFinished: ((String?, Double?) -> Void)?  // 錯誤訊息、RTF
+
+    private func main(_ f: @escaping () -> Void) { DispatchQueue.main.async(execute: f) }
+
+    private func ensureRecognizer(dir: String) throws -> OzAsrRecognizer {
+        if let r = recognizer { try r.reset(); return r }
+        let r = try OzAsrRecognizer(config: OzAsrConfig(modelsDirectory: dir))
+        recognizer = r
+        let load = r.loadSeconds
+        main { self.onLoaded?(load) }
+        return r
+    }
+
+    private func publish() {
+        guard let u = session?.tracker.utterances ?? tracker?.utterances else { return }
+        main { self.onUtterances?(u) }
+    }
+
+    // MARK: wav（依實際時長以即時節奏送入，牆鐘計時）
+
+    func runWav(dir: String, paths: [String], pushToTalk: Bool) {
+        stopFlag = StopFlag()
+        let flag = stopFlag
+        queue.async {
+            do {
+                self.main { self.onStatus?("載入模型…") }
+                let rec = try self.ensureRecognizer(dir: dir)
+                var total = 0.0
+                var rtf: Double?
+                if pushToTalk {
+                    // 每個檔案當作一次「按住」，音訊結束時「放開」並強制定稿（不補靜音）
+                    let s = OzPushToTalkSession(recognizer: rec)
+                    self.session = s
+                    self.tracker = nil
+                    for p in paths {
+                        if flag.isSet { break }
+                        let audio = try OzWav.load(path: p)
+                        total += Double(audio.count) / Double(OzWav.sampleRate)
+                        self.main { self.onHolding?(true); self.onStatus?("按住中（wav 模擬）") }
+                        try OzPacedFeeder.feedPushToTalk(session: s, samples: audio, shouldStop: { flag.isSet }) { _ in
+                            self.publish()
+                        }
+                        self.main { self.onHolding?(false) }
+                        self.publish()
+                    }
+                } else {
+                    // 多個檔案接成一條連續串流，每個檔案後補 1 s 靜音（讓 700 ms 定稿門檻在牆鐘下觸發）
+                    var audio: [Float] = []
+                    for p in paths {
+                        audio += try OzWav.load(path: p)
+                        audio += [Float](repeating: 0, count: OzWav.sampleRate)
+                    }
+                    total = Double(audio.count) / Double(OzWav.sampleRate)
+                    self.session = nil
+                    var t = OzUtteranceTracker(streamOrigin: OzClock.now())
+                    self.tracker = t
+                    self.main { self.onStatus?("辨識中（即時節奏送入 \(String(format: "%.1f", total)) s）") }
+                    try OzPacedFeeder.feed(
+                        recognizer: rec, samples: audio, realtime: true, shouldStop: { flag.isSet },
+                        onOrigin: { t.streamOrigin = $0 },
+                        onEvents: { evs in
+                            for e in evs { t.apply(e) }
+                            self.tracker = t
+                            self.publish()
+                        })
+                }
+                if total > 0 { rtf = rec.computeSeconds / total }
+                self.main { self.onFinished?(nil, rtf) }
+            } catch {
+                self.main { self.onHolding?(false); self.onFinished?("\(error)", nil) }
+            }
+        }
+    }
+
+    // MARK: 麥克風（只有使用者按「開啟麥克風」才會開啟輸入裝置）
+
+    func startMic(dir: String, pushToTalk: Bool) {
+        stopFlag = StopFlag()
+        queue.async {
+            do {
+                self.main { self.onStatus?("載入模型…") }
+                let rec = try self.ensureRecognizer(dir: dir)
+                self.micStarted = false
+                if pushToTalk {
+                    self.session = OzPushToTalkSession(recognizer: rec)
+                    self.tracker = nil
+                } else {
+                    self.session = nil
+                    self.tracker = OzUtteranceTracker(streamOrigin: OzClock.now())
+                }
+                let m = OzMicrophone()
+                try m.start { chunk in
+                    // 音訊執行緒只 dispatch；按下 / 放開 / chunk 都在同一佇列，順序才正確
+                    self.queue.async { self.handleChunk(chunk, pushToTalk: pushToTalk) }
+                }
+                self.mic = m
+                self.main {
+                    self.onStatus?(pushToTalk ? "麥克風已開啟：按住按鈕或空白鍵說話" : "聆聽中…")
+                }
+            } catch {
+                self.main { self.onFinished?("\(error)", nil) }
+            }
+        }
+    }
+
+    private func handleChunk(_ chunk: [Float], pushToTalk: Bool) {
+        guard mic != nil else { return }
+        do {
+            if pushToTalk {
+                if let s = session, !s.isPressed { return }
+                if try !(session?.accept(chunk) ?? []).isEmpty { publish() }
+            } else {
+                guard var t = tracker else { return }
+                if !micStarted { t.streamOrigin = OzClock.now() - 0.01; micStarted = true }
+                let evs = try recognizer?.acceptWaveform(chunk) ?? []
+                for e in evs { t.apply(e) }
+                tracker = t
+                if !evs.isEmpty { publish() }
+            }
+        } catch {
+            main { self.onStatus?("錯誤：\(error)") }
+        }
+    }
+
+    func press() {
+        queue.async { self.session?.press() }
+    }
+
+    func release() {
+        queue.async {
+            do { _ = try self.session?.release() } catch { self.main { self.onStatus?("錯誤：\(error)") } }
+            self.publish()
+        }
+    }
+
+    /// 停止：wav 中止；麥克風關閉。連續收音會 flush 進行中的句子；按住說話若還按著則先放開定稿。
+    func stop() {
+        stopFlag.set()
+        queue.async {
+            self.mic?.stop()
+            let hadMic = self.mic != nil
+            self.mic = nil
+            if hadMic {
+                do {
+                    if let s = self.session { _ = try s.release() } else if var t = self.tracker, let r = self.recognizer {
+                        for e in try r.flush() { t.apply(e) }
+                        self.tracker = t
+                    }
+                } catch {}
+                self.publish()
+                self.main { self.onFinished?(nil, nil) }
+            }
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var mode = InputMode.wav
+    @Published var mode = InputMode.pushToTalk
+    @Published var wavPushToTalk = true
     @Published var modelsDir: String = ModelLocator.locate() ?? ""
     @Published var wavPaths: [String] = []
     @Published var running = false
+    @Published var holding = false
     @Published var utterances: [OzUtterance] = []
     @Published var statusText = "尚未載入模型"
     @Published var loadSeconds: Double?
@@ -32,14 +205,20 @@ final class AppModel: ObservableObject {
     @Published var rtf: Double?
     @Published var errorText: String?
 
-    private var recognizer: OzAsrRecognizer?
-    private let queue = DispatchQueue(label: "ozasr.engine", qos: .userInitiated)
-    private var stopFlag = StopFlag()
-    private var mic: OzMicrophone?
+    private let worker = Worker()
     private var memTimer: Timer?
-    private var audioSeconds = 0.0
+    private var keyMonitor: Any?
 
     init() {
+        worker.onUtterances = { [weak self] in self?.utterances = $0 }
+        worker.onLoaded = { [weak self] in self?.loadSeconds = $0 }
+        worker.onStatus = { [weak self] in self?.statusText = $0 }
+        worker.onHolding = { [weak self] in self?.holding = $0 }
+        worker.onFinished = { [weak self] err, rtf in
+            guard let self else { return }
+            if let rtf { self.rtf = rtf }
+            self.finish(error: err)
+        }
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--models"), i + 1 < args.count { modelsDir = args[i + 1] }
         var j = 0
@@ -47,14 +226,17 @@ final class AppModel: ObservableObject {
             if args[j] == "--autorun-wav", j + 1 < args.count { wavPaths.append(args[j + 1]); j += 1 }
             j += 1
         }
-        // 文件截圖用：--snapshot-after 秒數 --snapshot-to 路徑；把自己的視窗內容存成 PNG 後結束（不需要螢幕錄製權限）
+        if args.contains("--autorun-continuous") { wavPushToTalk = false }
+        if !wavPaths.isEmpty { mode = .wav }
+        installSpaceKey()
+        // 文件截圖用：--snapshot-after 秒數 --snapshot-to 路徑；把介面渲染成 PNG 後結束（不需要螢幕錄製權限）
         if let i = args.firstIndex(of: "--snapshot-to"), i + 1 < args.count {
             let path = args[i + 1]
             var after = 10.0
             if let k = args.firstIndex(of: "--snapshot-after"), k + 1 < args.count { after = Double(args[k + 1]) ?? 10 }
             DispatchQueue.main.asyncAfter(deadline: .now() + after) { [self] in
                 let model = self
-                let r = ImageRenderer(content: ContentView(model: model).frame(width: 760, height: 580)
+                let r = ImageRenderer(content: ContentView(model: model).frame(width: 760, height: 640)
                     .background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .light))
                 r.scale = 1.5
                 if let img = r.nsImage, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) {
@@ -67,6 +249,17 @@ final class AppModel: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.start() }
         }
     }
+
+    /// 空白鍵按住說話（只在按住說話模式且麥克風已開啟時作用；放開即定稿）
+    private func installSpaceKey() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] e in
+            guard e.keyCode == 49, let self, self.mode == .pushToTalk, self.running else { return e }
+            if e.type == .keyDown { if !e.isARepeat { self.pressStart() } } else { self.pressEnd() }
+            return nil
+        }
+    }
+
+    var showsTalkButton: Bool { mode == .pushToTalk || (mode == .wav && wavPushToTalk) }
 
     var liveUtterance: OzUtterance? {
         guard let u = utterances.last, u.status != .final else { return nil }
@@ -99,16 +292,34 @@ final class AppModel: ObservableObject {
         running = true
         utterances = []
         rtf = nil
-        stopFlag = StopFlag()
         memTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshMemory() }
         }
-        mode == .wav ? startWav() : startMic()
+        switch mode {
+        case .wav: worker.runWav(dir: modelsDir, paths: wavPaths, pushToTalk: wavPushToTalk)
+        case .pushToTalk: worker.startMic(dir: modelsDir, pushToTalk: true)
+        case .continuous: worker.startMic(dir: modelsDir, pushToTalk: false)
+        }
     }
 
     func stop() {
-        stopFlag.set()
-        if mode == .microphone { stopMic() }
+        holding = false
+        worker.stop()
+    }
+
+    /// 按下（按鈕或空白鍵）。只有按住說話模式且麥克風已開啟才有作用。
+    func pressStart() {
+        guard mode == .pushToTalk, running, !holding else { return }
+        holding = true
+        statusText = "收音中…放開即定稿"
+        worker.press()
+    }
+
+    func pressEnd() {
+        guard mode == .pushToTalk, holding else { return }
+        holding = false
+        statusText = "麥克風已開啟：按住按鈕或空白鍵說話"
+        worker.release()
     }
 
     private func refreshMemory() {
@@ -116,125 +327,12 @@ final class AppModel: ObservableObject {
         currentRSS = OzMemory.currentResidentMB()
     }
 
-    private func finish(error: String? = nil) {
+    private func finish(error: String?) {
         running = false
+        holding = false
         memTimer?.invalidate()
         refreshMemory()
         if let error { errorText = error }
-        statusText = "已停止"
-    }
-
-    /// 在 engine 佇列載入模型（只載一次）
-    private func ensureRecognizer() throws -> OzAsrRecognizer {
-        if let r = recognizer { try r.reset(); return r }
-        let t = OzClock.now()
-        let r = try OzAsrRecognizer(config: OzAsrConfig(modelsDirectory: modelsDir))
-        _ = t
-        recognizer = r
-        return r
-    }
-
-    // MARK: wav 模式（依實際時長以即時節奏送入，牆鐘計時）
-
-    private func startWav() {
-        let paths = wavPaths
-        let flag = stopFlag
-        let dir = modelsDir
-        statusText = "載入模型…"
-        queue.async { [weak self] in
-            do {
-                let hadModel = DispatchQueue.main.sync { self?.recognizer != nil }
-                let rec: OzAsrRecognizer
-                if hadModel {
-                    rec = try DispatchQueue.main.sync { try self!.ensureRecognizer() }
-                } else {
-                    rec = try OzAsrRecognizer(config: OzAsrConfig(modelsDirectory: dir))
-                    DispatchQueue.main.async {
-                        self?.recognizer = rec
-                        self?.loadSeconds = rec.loadSeconds
-                    }
-                }
-                // 多個檔案接成一條連續的串流，每個檔案後補 1 s 靜音（和麥克風持續收音一樣，讓定稿門檻在牆鐘下觸發）
-                var audio: [Float] = []
-                for p in paths {
-                    audio += try OzWav.load(path: p)
-                    audio += [Float](repeating: 0, count: OzWav.sampleRate)
-                }
-                let total = Double(audio.count) / Double(OzWav.sampleRate)
-                var tracker = OzUtteranceTracker(streamOrigin: OzClock.now())
-                DispatchQueue.main.async { self?.statusText = "辨識中（即時節奏送入 \(String(format: "%.1f", total)) s）" }
-                let origin = try OzPacedFeeder.feed(
-                    recognizer: rec, samples: audio, realtime: true, shouldStop: { flag.isSet },
-                    onOrigin: { tracker.streamOrigin = $0 },
-                    onEvents: { evs in
-                        for e in evs { tracker.apply(e) }
-                        let snap = tracker.utterances
-                        DispatchQueue.main.async { self?.utterances = snap }
-                    })
-                _ = origin
-                let compute = rec.computeSeconds
-                DispatchQueue.main.async {
-                    self?.rtf = compute / total
-                    self?.finish()
-                    self?.statusText = flag.isSet ? "已停止" : "完成"
-                }
-            } catch {
-                DispatchQueue.main.async { self?.finish(error: "\(error)") }
-            }
-        }
-    }
-
-    // MARK: 麥克風模式（只有使用者按「開始」才會開啟輸入裝置）
-
-    private func startMic() {
-        let flag = stopFlag
-        let dir = modelsDir
-        statusText = "載入模型…"
-        queue.async { [weak self] in
-            do {
-                let rec: OzAsrRecognizer
-                if let existing = DispatchQueue.main.sync(execute: { self?.recognizer }) {
-                    try existing.reset()
-                    rec = existing
-                } else {
-                    rec = try OzAsrRecognizer(config: OzAsrConfig(modelsDirectory: dir))
-                    DispatchQueue.main.async {
-                        self?.recognizer = rec
-                        self?.loadSeconds = rec.loadSeconds
-                    }
-                }
-                var tracker = OzUtteranceTracker(streamOrigin: OzClock.now())
-                var started = false
-                let m = OzMicrophone()
-                try m.start { chunk in
-                    self?.queue.async {
-                        if flag.isSet { return }
-                        if !started { tracker.streamOrigin = OzClock.now() - 0.01; started = true }
-                        guard let evs = try? rec.acceptWaveform(chunk) else { return }
-                        if evs.isEmpty { return }
-                        for e in evs { tracker.apply(e) }
-                        let snap = tracker.utterances
-                        DispatchQueue.main.async { self?.utterances = snap }
-                    }
-                }
-                DispatchQueue.main.async {
-                    self?.mic = m
-                    self?.statusText = "聆聽中…"
-                }
-            } catch {
-                DispatchQueue.main.async { self?.finish(error: "\(error)") }
-            }
-        }
-    }
-
-    private func stopMic() {
-        mic?.stop()
-        mic = nil
-        queue.async { [weak self] in
-            // 讓排在佇列前面的 chunk 先處理完，再 flush 結束進行中的句子
-            DispatchQueue.main.async {
-                self?.finish()
-            }
-        }
+        statusText = error == nil ? "完成" : "已停止"
     }
 }

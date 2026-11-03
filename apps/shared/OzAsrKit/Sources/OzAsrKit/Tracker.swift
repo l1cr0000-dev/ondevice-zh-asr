@@ -16,6 +16,8 @@ public struct OzUtterance: Identifiable, Sendable {
     /// 定稿（或最後一次更新）的牆鐘時刻 − 語音終點的音訊時間；模擬值對照用。
     public var simulatedFirstTokenLatency: Double?
     public var simulatedFinalLatency: Double?
+    /// 按住說話：放開（`markRelease`）到定稿事件的牆鐘（秒）。連續收音模式為 nil。
+    public var releaseToFinalLatency: Double?
     var simulatedStart = 0.0
 }
 
@@ -24,9 +26,32 @@ public struct OzUtterance: Identifiable, Sendable {
 /// wav 模式是精確的（依即時節奏送入）；麥克風模式忽略系統收音緩衝（約數十 ms），為近似值。
 public struct OzUtteranceTracker: Sendable {
     public private(set) var utterances: [OzUtterance] = []
-    public var streamOrigin: TimeInterval
+    /// 第一段 = (音訊時間 0, 串流起點牆鐘)；按住說話每次按下會新增一段（音訊時間軸在放開期間不前進）。
+    private var segments: [(audio: Double, wall: TimeInterval)]
+    private var releaseWall: TimeInterval?
 
-    public init(streamOrigin: TimeInterval) { self.streamOrigin = streamOrigin }
+    public var streamOrigin: TimeInterval {
+        get { segments[0].wall }
+        set { segments[0].wall = newValue }
+    }
+
+    public init(streamOrigin: TimeInterval) { segments = [(0, streamOrigin)] }
+
+    /// 音訊時間 t（秒）對應的牆鐘。
+    public func wallTime(ofAudio t: Double) -> TimeInterval {
+        let seg = segments.last(where: { $0.audio <= t }) ?? segments[0]
+        return seg.wall + (t - seg.audio)
+    }
+
+    /// 按住說話：按下。`audio` = 此刻已送入辨識器的音訊長度（秒）。
+    public mutating func beginSegment(audio: Double, wall: TimeInterval) {
+        if let last = segments.last, last.audio == audio { segments[segments.count - 1].wall = wall; return }
+        segments.append((audio, wall))
+        releaseWall = nil
+    }
+
+    /// 按住說話：放開的牆鐘（在呼叫 finalize 之前標記）。
+    public mutating func markRelease(wall: TimeInterval) { releaseWall = wall }
 
     public mutating func apply(_ e: OzAsrEvent) {
         if utterances.last?.id != e.utterance {
@@ -43,15 +68,17 @@ public struct OzUtteranceTracker: Sendable {
         case .provisional: utterances[i].status = .provisional
         case .final:
             utterances[i].status = .final
+            if let r = releaseWall { utterances[i].releaseToFinalLatency = e.wallTime - r }
+            releaseWall = nil
             utterances[i].speechEnd = e.speechEnd
             if let end = e.speechEnd {
-                utterances[i].finalLatency = e.wallTime - (streamOrigin + end)
+                utterances[i].finalLatency = e.wallTime - wallTime(ofAudio: end)
                 utterances[i].simulatedFinalLatency = e.simulatedEmitted - end
             }
         }
         utterances[i].text = e.text
         if utterances[i].firstTokenLatency == nil, !e.text.isEmpty {
-            utterances[i].firstTokenLatency = e.wallTime - (streamOrigin + e.speechStart)
+            utterances[i].firstTokenLatency = e.wallTime - wallTime(ofAudio: e.speechStart)
             utterances[i].simulatedFirstTokenLatency = e.simulatedEmitted - e.speechStart
         }
     }

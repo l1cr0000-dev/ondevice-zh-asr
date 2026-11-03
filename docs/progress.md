@@ -2266,13 +2266,45 @@ scripts/compare_mac_app.py      app --headless 與 ozasr_cli 輸出的比對
 - 首字 / 尾字延遲：牆鐘與模擬值只差 +8 ms / +2 ms。首字多出的部分來自 `Thread.sleep` 醒來的排程誤差（每個 chunk 約 +1 ms 內）與事件由 C 呼叫返回後才標記；尾字差更小，因為最後一次推論耗時主導。
 - RTF 比 CLI 高約 0.01：app 為了真實節奏，每 10 ms 睡一次，CPU 在 chunk 間閒置、時脈與快取較冷，同樣的推論耗時略增；加上每次呼叫的事件取出與計時開銷。仍遠低於 1。
 - GUI 峰值記憶體約 **450 MB**（4 句連續串流，目前 448 MB），高於 headless 的 374 MB：多出 SwiftUI / AppKit 本身（約 75–80 MB）。核心本身的記憶體與 CLI 一致。
-- 截圖：`docs/mac-app-wav-mode.png`（wav 模式連續 4 句，即時顯示 partial、歷史每句首字 / 尾字延遲、載入時間與記憶體）。截圖由 app 自身的 `--snapshot-to` 以 SwiftUI `ImageRenderer` 輸出（此環境沒有螢幕錄製權限）；為了讓 `ImageRenderer` 畫得出來，介面的按鈕與分段控制是自訂的 `PillButton`、歷史清單在截圖模式不用 ScrollView，截圖與實際視窗外觀略有差異（系統控制項樣式）。
+- 截圖：`docs/mac-app-wav-mode.png`（見下一節，wav 模擬按住說話：即時 partial、歷史每句首字 / 尾字 / 放開→定稿延遲、載入時間與記憶體）。截圖由 app 自身的 `--snapshot-to` 以 SwiftUI `ImageRenderer` 輸出（此環境沒有螢幕錄製權限）；為了讓 `ImageRenderer` 畫得出來，介面的按鈕與分段控制是自訂的 `PillButton`、歷史清單在截圖模式不用 ScrollView，截圖與實際視窗外觀略有差異（系統控制項樣式）。
 - 麥克風路徑已寫好並編譯通過，但**沒有執行**（本次任務不開音訊輸入裝置）；麥克風下的牆鐘延遲尚未量測。
 - `uv run pytest`（204 項）、`uv run mypy`、`uv run ruff check .`、ctest（5 項）都通過。
 
 ### 還沒做
 
 - 麥克風實測（含收音緩衝造成的延遲低估、權限流程、取樣率轉換在不同裝置上的行為）。
-- 麥克風停止時的 `flush()`：目前按「停止」只停收音並結束，沒有 flush 進行中的句子。
 - XCTest / 自動化 UI 測試；目前自動驗證靠 `--headless` 與 `scripts/compare_mac_app.py`。
 - 圖示、正式簽名與公證；iPhone（onnxruntime xcframework、AVAudioSession、Xcode 專案）與 Android。
+
+## 2026-11-03　Mac app 改為「按住說話」為主（push-to-talk）
+
+使用者追加需求：主要互動改成按住說話；放開立刻定稿，不等 700 ms 靜音；按住期間仍保留 VAD 與 A2；連續收音（VAD 自動斷句）保留為次要選項。
+
+### C++ 核心 / C API 補強
+
+原有 `ozasr_flush` 是「輸入結束」語意（補零處理剩餘樣本、結束後要 `reset`），不適合反覆按放，所以新增：
+
+- `StreamingVad::force_end()`：Speech 狀態立刻發 End（位置 = min(最後語音 + pad, 已送入樣本)），Pending 候選丟棄，不補零、可繼續送入。
+- `Pipeline::finalize_utterance()`：呼叫 `force_end()` 後走原本的 `finish()`。句子在停頓中（已出暫定結果）時直接以暫定結果定稿，**不再解碼**；說話中放開則對整句做一次 finalize 解碼。沒有進行中的句子時不產生事件。
+- C API：`ozasr_finalize_utterance(handle)`，事件仍用 `ozasr_next_event` 取。
+- ctest 新增：`test_vad`（force_end 的 End 位置 / 重複呼叫無事件）、`test_pipeline`（說話中放開立刻定稿且之後可繼續送入；停頓後放開以暫定結果定稿、解碼次數不增加）、`test_c_api`（NULL handle）。5 項全過。
+- 限制：按下後語音不足 `vad_min_speech_ms`（250 ms）就放開，VAD 尚未確認語音，這次不會有任何辨識結果。
+
+### Swift 與 app
+
+- `OzAsrRecognizer.finalizeUtterance()`；`OzPushToTalkSession`（Kit，iPhone 可重用）：`press()` / `accept(chunk)`（沒按住時丟棄）/ `release()`；放開期間的音訊不送入，音訊時間軸不前進。`OzUtteranceTracker` 因此改成分段的「音訊時間 → 牆鐘」對照，並新增 `releaseToFinalLatency`（放開瞬間的牆鐘到定稿事件的牆鐘）。
+- app：預設模式「按住說話」——「開啟麥克風」後出現一個大按鈕，按住收音、放開定稿；**空白鍵**同樣按住說話。麥克風在開啟期間持續開著（避免按下時才開引擎造成開頭被切掉），沒按住時的音訊直接丟棄、不辨識。「連續收音」是原本的 VAD 自動斷句（現在按停止會 flush 進行中的句子）。wav 模式可勾「模擬按住說話」：每個檔案當一次按住，音訊結束瞬間放開。
+- 無介面：`--headless --ptt`（每檔一次按放）、`--ptt-release-after-speech-ms N`（先跑一遍找語音終點，再截到終點 + N ms 才放開）。
+
+### 驗證（wav 模擬按放、牆鐘即時節奏；同一組 15 句冒煙集，第 1 句暖機）
+
+| 放開時機 | 放開→定稿延遲（均值 / 中位 / 最大） | 與連續模式定稿文字不同 |
+|---|---|---|
+| 檔案結束（clip 結尾本來就有數百 ms 靜音，放開時已出暫定結果） | ≈ 0 ms（< 0.01 ms，直接用暫定結果） | 0 / 15 |
+| 語音終點 + 60 ms（放開時尚未出暫定結果，最壞情況：放開才解碼整句） | **75 / 72 / 103 ms** | 2 / 15 |
+| 語音終點 + 0 ms | 75 / 74 / 99 ms | 1 / 15 |
+
+- 對照連續模式（A2）尾字延遲約 680 ms：按住說話把「語音結束到定稿」從約 0.68 s 降到最壞約 0.1 s（一次整句解碼，約 50–100 ms）。放開時若已超過 150 ms 停頓，則幾乎為 0。
+- 後兩列的文字差異不是 bug：音訊被截到語音終點後，辨識器看到的輸入長度與尾端靜音不同，INT8 模型對此敏感（其中一句還從「二八日」變成正確的「二十八日」，一句「死霞仙子」變「死侠仙子」）。第一列音訊完全相同，文字就逐字一致。
+- 首字延遲仍約 409 ms、RTF 0.047–0.050（比連續模式的 0.039 略高，同樣因為每 10 ms 睡眠；峰值 RSS 375–380 MB）。
+- 麥克風路徑與空白鍵按放**沒有執行**（不開音訊輸入裝置）；按住期間延遲與實際收音緩衝的關係待使用者測。GUI wav 模擬按放時，檔案之間不 reset，前一檔的尾端會進下一檔的 pre-roll，所以個別句子文字可能與單檔跑（headless）不同（例：「竟只是」→「静只是」）。
