@@ -1,5 +1,6 @@
 """暫定結果（停頓事件）的分析指標，供 scripts/pause_analysis.py 使用（backlog B9）。"""
 
+import itertools
 from typing import Any
 
 import numpy as np
@@ -22,6 +23,23 @@ def is_boundary_provisional(audio_end_s: float, sentences: list[dict[str, Any]])
     return audio_end_s >= sentences[-1]["end_s"] or any(
         s["end_s"] <= audio_end_s <= s["end_s"] + BOUNDARY_WINDOW_S for s in sentences
     )
+
+
+def max_char_gap(chars: list[dict[str, Any]]) -> float:
+    """MFA 字級對齊中，相鄰兩字之間最長的空隙（前一字結束 → 下一字起點，秒）；只有一個字時為 0。"""
+    return max((b["start"] - a["end"] for a, b in itertools.pairwise(chars)), default=0.0)
+
+
+def final_latency_s(utterance: dict[str, Any], true_end_s: float) -> float | None:
+    """說完 → 定稿：真實末字結束 → 最後一個句段的最終結果（單句集）。沒有句段或沒有定稿時為 None。
+
+    與 `tail_latency_s`（VAD 終點起算）不同，起點不依賴 VAD；最後一個句段若是句中誤切出來的，
+    它的最終結果仍是這句最後一個字定稿的時刻。
+    """
+    segs = utterance["segments"]
+    if not segs or segs[-1]["final_s"] is None:
+        return None
+    return float(segs[-1]["final_s"] - true_end_s)
 
 
 def decoded_audio_ratio(result: dict[str, Any]) -> float:

@@ -2,7 +2,13 @@
 
 import numpy as np
 
-from eval.pause import decoded_audio_ratio, is_boundary_provisional, longest_run_below
+from eval.pause import (
+    decoded_audio_ratio,
+    final_latency_s,
+    is_boundary_provisional,
+    longest_run_below,
+    max_char_gap,
+)
 
 
 def test_longest_run_below() -> None:
@@ -28,3 +34,22 @@ def test_decoded_audio_ratio_counts_only_resumed_provisionals() -> None:
     }
     result = {"utterances": [{"duration_s": 10.0, "segments": [seg]}]}
     assert decoded_audio_ratio(result) == 1 + 2.0 / 10.0
+
+
+def test_max_char_gap() -> None:
+    chars = [
+        {"start": 0.5, "end": 0.8},
+        {"start": 0.8, "end": 1.0},
+        {"start": 1.6, "end": 1.9},  # 字間空隙 0.6 s
+        {"start": 2.0, "end": 2.2},
+    ]
+    assert abs(max_char_gap(chars) - 0.6) < 1e-9
+    assert max_char_gap(chars[:1]) == 0.0
+
+
+def test_final_latency_uses_last_segment() -> None:
+    # 句中被誤切成兩段：定稿時刻是最後一段的最終結果
+    u = {"segments": [{"final_s": 2.0}, {"final_s": 4.5}]}
+    assert abs((final_latency_s(u, 3.4) or 0) - 1.1) < 1e-9
+    assert final_latency_s({"segments": []}, 1.0) is None
+    assert final_latency_s({"segments": [{"final_s": None}]}, 1.0) is None
