@@ -2137,3 +2137,82 @@ Apple M5（Mac17,3）、macOS 27.0.1、Python 3.11.15、onnxruntime 1.31.1；分
 使用者決定：原第二階段的量化精度對比（FP32 / FP16 / 自行 INT8）先不做，繼續用官方 INT8 權重；下一階段改為**端側適配**，目標是在使用者自己的 Apple 設備上實際跑起來（先用 onnxruntime Apple 平台版跑通 Silero VAD + SenseVoice 偽串流，再評估 Core ML，最後做裝置端量測）。README 路線圖與「基準指標」同步改寫：最上方改列目前預設（SenseVoice + A2 150 / 700 ms）的 200 句冒煙集數字，X-ASR 時期的表格移到「歷史紀錄」。
 
 補充（同日）：使用者要求端側適配涵蓋 **Mac app、iPhone、Android** 三個平台。為避免同一套邏輯寫三次，路線圖改為 C++ 辨識核心 + onnxruntime，各平台只寫收音與介面。Android 超出 CLAUDE.md 原本「只有 Apple 設備」的硬體限制，需確認測試設備。
+
+---
+
+## 2026-11-03　C++ 辨識核心（`cpp/`，分支 `feat/cpp-core`）
+
+三平台共用的辨識核心，C++17 + onnxruntime C++ API，行為與 Python 版逐項對齊。這一步只在 macOS arm64 上建置與驗證（onnxruntime 1.31.1，與 Python 同版本）。
+
+### 設計
+
+```
+cpp/
+  include/ozasr/ozasr_c_api.h   純 C API（Swift / Kotlin JNI 用）
+  src/fbank.{h,cc}              自己實作的 kaldi 風格 fbank、LFR、CMVN（不含第三方程式碼）
+  src/vad.{h,cc}                SileroVad（32 ms frame、state、64 樣本 context）+ StreamingVad 狀態機
+  src/ctc.{h,cc}                CTC greedy、token → 文字；CtcDecoder 介面（熱詞擴充點）
+  src/sense_voice.{h,cc}        SenseVoiceAsr（Recognizer）、AsrStream（偽串流）、PartialSchedule
+  src/pipeline.{h,cc}           Pipeline：pre-roll 環形緩衝、A2 兩段門檻、暫定結果與重新解碼、模擬即時時鐘
+  src/c_api.cc                  C API 實作（例外 → 狀態碼，事件佇列）
+  tools/ozasr_cli.cc            讀 wav、10 ms chunk 模擬即時送入、每個檔案輸出一行 JSON
+  tools/ozasr_fbank.cc          對齊驗證用：輸出 log-mel 與 LFR+CMVN 特徵
+  tests/                        ctest：fbank/LFR、VAD 狀態機、CTC greedy、pipeline、C API
+```
+
+- 分層與 Python 一一對應：`FrameClassifier`（VAD 後端介面，之後可換 Core ML）、`Recognizer`（整段音訊 → 文字）、`AsrStream`（累積音訊、依 `PartialSchedule` 重新辨識整段當 partial）、`Pipeline`（`accept_waveform` / `flush` → 事件）。預設參數與 Python 預設相同：zh、偽串流 0.48 / 0.96 / max 3 s、min_silence 700 / pause 150、pre-roll 100 ms、`provisional=finalize`、2 執行緒、ASR 關 spinning。
+- 事件為 `start / partial / provisional / final`，帶音訊時間軸位置（`speech_start_s`、`speech_end_s`、`audio_start_s`、`audio_pos_s`，決定性）與模擬即時時刻 `emitted_s`（與 Python 同一套虛擬時鐘；真機即時使用時應改用牆鐘，之後平台層處理）。
+- fbank：80 維 mel（20–8000 Hz）、hamming、預強調 0.97、去 DC、512 點 FFT（內部用 double）、snip_edges、樣本乘 32768；LFR 與 CMVN 的參數（m / n / neg_mean / inv_stddev / language / text_norm id）全部讀模型 metadata。
+- C API：`ozasr_create / destroy / reset / accept_waveform / flush / next_event / get_stats / last_error`，C 結構設定，例外不跨越邊界；同一 handle 不可並行呼叫。
+- 熱詞（prefix beam search + Aho-Corasick）**這一步沒做**，介面留在 `CtcDecoder`（`SenseVoiceAsr::set_decoder`）。
+
+建置與使用見 README「C++ 辨識核心」。
+
+### 對齊結果
+
+**fbank**（`scripts/compare_fbank.py -n 50`，51 條音訊、24 563 個 frame）：
+
+| 比對 | 最大絕對誤差 |
+|---|---|
+| log-mel vs kaldi-native-fbank，AISHELL 語音 | 6.7e-4（< 1e-3 ✓） |
+| log-mel vs kaldi-native-fbank，合成 fixture | 1.05e-3 |
+| log-mel vs numpy float64 獨立參考 | 9.5e-7 |
+| LFR + CMVN 特徵 vs Python | 1.6e-4 |
+
+fixture 略超過 1e-3 是 kaldi-native-fbank 自己的 float32 FFT 捨入誤差，不是 C++ 的問題：fixture 第 123 frame 第 1 維，float64 = 1.92359、C++ = 1.92359、knf = 1.92253（低能量 bin）。AISHELL 語音最差的 frame 是近乎數位靜音的 frame（log 能量約 −8）。
+
+**端到端**（`scripts/compare_cpp.py`；冒煙集沿用 `eval/run_eval.py` 的前補 1000 ms / 後補 1500 ms 靜音、前 3 句暖機不計，故 197 條音訊 216 個句段；10 ms chunk、2 執行緒；兩邊各在獨立程序、依序執行）：
+
+| | fixture（1 條，2 句） | 200 句冒煙集（197 條，216 句段） |
+|---|---|---|
+| 句段數不同 | 0 | 0 |
+| VAD 切點差 > 1 frame | 0（最大 0 ms） | 0（最大 0 ms） |
+| partial 序列不同的句段 | 0 | 33 |
+| 暫定結果不同的句段 | 0 | 13 |
+| 定稿文字不同的句段 | 0 | 11（5.1 %） |
+| 事件序列不同的音訊 | 0 | 42 |
+| CER（Python / C++） | — | 3.71 % / 3.75 %（110 / 111 個字錯，共 2961 字） |
+| RTF（Python / C++） | 0.0297 / 0.0288 | 0.0319 / 0.0311 |
+| 載入後 RSS（MB） | 393 / 350 | 396 / 345 |
+| 峰值 RSS（MB） | 400 / 356 | 446 / 392 |
+| 整段推論次數（Python / C++） | 6 / 6 | 1048 / 1060 |
+
+- **VAD 與事件的排程完全對齊**：所有句段的起訖點、`audio_start_s` 都與 Python 相同（0 差距），fixture 的事件序列（類型、文字、音訊位置）逐項相同。事件 `emitted_s` 差距中位數 −0.1 ms、平均絕對 0.5 ms（1117 個事件，僅事件序列相同的音訊）。
+- **文字差異來自特徵的數值精度，不是邏輯**：冒煙集 42 條音訊的事件序列不同，起因都是某次辨識的文字不同（個別字，例如「二十八」→「二八」、「周云露」→「周云路」、「死霞仙」→「死霞仙子」）；一旦某個中間 partial 不同，之後的推論次數也會變（1048 vs 1060）。驗證：用**同一個 Python onnxruntime 1.31.1**，只把輸入特徵從 knf 換成 C++ 算的（差 ≤ 1.6e-4），前 100 句整句辨識就有 2 句文字不同——INT8 模型對 1e-4 等級的特徵差異很敏感，與推論實作無關。C++ 特徵對 float64 參考的誤差（9.5e-7）遠小於 knf，所以逐字相同在 knf 的 float32 捨入下本來就做不到；若要 100 % 逐字相同，只能在 C++ 重現 knf 的 float32 FFT 演算法（需移植其原始碼，這一步沒做）。
+- CER 差 +1 個字（3.71 → 3.75 %）在雜訊內。Python 預設的 3.80 % 是含暖機的 200 句，這裡的 3.71 % 排除前 3 句。
+- RTF 與 Python 相當（C++ 略低 2–3 %）：計算量由 onnxruntime 推論主導，語言不是瓶頸。峰值 RSS 比 Python 少約 50 MB（不含直譯器與 numpy），但仍約 390 MB，主體是 SenseVoice INT8 模型與 onnxruntime 的 arena（見 2026-11-03 session 選項）；手機端的記憶體要另外評估。
+- RTF 取自單次量測，機器有其他程序在跑（load average 未記錄），只當量級參考。
+
+### 測試
+
+- ctest 5 項：`fbank`（frame 數、與 knf 的黃金值、LFR 邊界、CMVN）、`vad`（假分類器驗證 start / pause / resume / end 的位置與 detected_at、chunk 大小無關、遲滯、太短丟棄、flush、參數檢查）、`ctc`（greedy、平手取第一個、token → 文字）、`pipeline`（假 VAD + 假辨識器，驗證兩種暫定做法的事件序列與送入 ASR 的音訊範圍、pre-roll、排程）、`c_api`（參數與錯誤碼）。
+- pytest `tests/test_cpp.py`：沒建置 `cpp/build/ozasr_cli` 時整組跳過；建置了就跑 ctest，並比對 fixture（句段數、VAD 切點 ≤ 1 frame、partial / 暫定 / 定稿文字逐字相同）。
+- `uv run pytest`（204 項）、`uv run mypy`、`uv run ruff check .` 通過。
+
+### 還沒做
+
+- 熱詞（`CtcDecoder` 擴充點已留）、beam search。
+- 執行緒設定只有 ASR / VAD 各自的 `num_threads`（預設 2），沒有親和性或大小核設定；iOS / Android 的值要在真機上掃。
+- 事件時刻在核心裡仍是「模擬即時」虛擬時鐘；真機即時辨識時要由平台層用牆鐘標記。
+- 只在 macOS arm64 建置；iOS（onnxruntime xcframework）與 Android（AAR + JNI）的建置、Core ML / NNAPI execution provider 未試。
+- 沒跑 3000 句與 300 句對齊集（只跑 fixture 與 200 句冒煙集）。

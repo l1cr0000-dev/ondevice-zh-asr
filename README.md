@@ -81,7 +81,7 @@ git clone <repo-url> && cd ondevice-zh-asr   # repo 尚未公開，<repo-url> �
 uv sync                                   # 安裝依賴（uv 會自動下載 Python 3.11）
 uv run scripts/check_env.py               # 檢查環境：最後一行應為 OK
 bash scripts/download_models.sh           # 下載模型到 models/（5 個模型，解壓後約 640 MB，含 SHA-256 校驗，可重複執行）
-uv run pytest                             # 應為 202 passed、0 skipped
+uv run pytest                             # 應為 202 passed、0 skipped（未建置 C++ 時 tests/test_cpp.py 的 2 項會跳過；建置後 204 passed）
 ```
 
 `check_env.py` 列出套件版本、ONNX Runtime providers（應有 `CoreMLExecutionProvider` 與 `CPUExecutionProvider`）與麥克風；任何一項失敗都會以非零狀態碼結束。
@@ -100,6 +100,19 @@ uv run scripts/demo_mic.py                # 麥克風即時辨識，Ctrl+C 結�
 預設的結束判定是兩段門檻（方案 A2）：句中靜音 150 ms 先 finalize 出暫定結果（標「（暫定）」），靜音滿 700 ms 才定稿（2026-11-03 起，原為 1000 ms，針對車艙短指令）；暫定結果之後若又開始說話，會重新解碼整句並修正。上面三個腳本與 `eval/run_eval.py` 都可用 `--min-silence-ms 500 --pause-ms 0` 退回舊的單一門檻 500 ms。
 
 第一次跑 `demo_mic.py` 時 macOS 會詢問麥克風權限；若曾拒絕，腳本會提示到「系統設定 → 隱私權與安全性 → 麥克風」開啟。
+
+C++ 辨識核心（`cpp/`，第二階段的三平台共用核心；需要 cmake 與 onnxruntime C++ 預編譯包，路徑用 `-DORT_ROOT` 指定）：
+
+```bash
+cmake -S cpp -B cpp/build -DORT_ROOT=$PWD/third_party/onnxruntime-osx-arm64-1.31.1
+cmake --build cpp/build -j
+ctest --test-dir cpp/build --output-on-failure           # C++ 單元測試（fbank / VAD 狀態機 / CTC / pipeline / C API）
+cpp/build/ozasr_cli --models-dir models tests/fixtures/vad_two_utterances.wav   # 每個檔案輸出一行 JSON 事件
+uv run scripts/compare_cpp.py             # 與 Python 版對齊：fixture + 200 句冒煙集（約 2 分鐘）
+uv run scripts/compare_fbank.py           # fbank / LFR 與 kaldi-native-fbank 的數值比對
+```
+
+C API 標頭在 `cpp/include/ozasr/ozasr_c_api.h`（Swift / Kotlin JNI 用）；設計與對齊結果見 [docs/progress.md](docs/progress.md)。沒建置 C++ 時，`tests/test_cpp.py` 會自動跳過。
 
 評測：
 
