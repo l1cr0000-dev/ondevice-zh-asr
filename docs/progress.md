@@ -2135,3 +2135,5 @@ Apple M5（Mac17,3）、macOS 27.0.1、Python 3.11.15、onnxruntime 1.31.1；分
 ## 2026-11-03　決定：量化精度對比暫緩，下一階段改為端側適配
 
 使用者決定：原第二階段的量化精度對比（FP32 / FP16 / 自行 INT8）先不做，繼續用官方 INT8 權重；下一階段改為**端側適配**，目標是在使用者自己的 Apple 設備上實際跑起來（先用 onnxruntime Apple 平台版跑通 Silero VAD + SenseVoice 偽串流，再評估 Core ML，最後做裝置端量測）。README 路線圖與「基準指標」同步改寫：最上方改列目前預設（SenseVoice + A2 150 / 700 ms）的 200 句冒煙集數字，X-ASR 時期的表格移到「歷史紀錄」。
+
+補充（同日）：使用者要求端側適配涵蓋 **Mac app、iPhone、Android** 三個平台。為避免同一套邏輯寫三次，路線圖改為 C++ 辨識核心 + onnxruntime，各平台只寫收音與介面。Android 超出 CLAUDE.md 原本「只有 Apple 設備」的硬體限制，需確認測試設備。

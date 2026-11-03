@@ -12,7 +12,7 @@
 ## 建議處理順序
 
 1. 新預設（SenseVoice 偽串流）的後續：閒置時重量 RTF 與延遲、商用書面確認（使用者處理）、「去 ASCII」顯示規則實作到 pipeline / demo（目前只在評測中模擬）
-2. **下一階段改為端側適配**（2026-11-03 使用者決定：量化精度對比暫緩，先讓 SenseVoice 偽串流在使用者的 Apple 設備上跑起來，見 README 路線圖）：先用 onnxruntime（Apple 平台版）跑通，再評估 **B16** Core ML（目標改為 SenseVoice）、**B11** 模型體積
+2. **下一階段改為端側適配**（2026-11-03 使用者決定：量化精度對比暫緩，先讓 SenseVoice 偽串流在 Mac app、iPhone、Android 上跑起來；C++ 核心 + onnxruntime，各平台只寫收音與介面，見 README 路線圖）：先用 onnxruntime（Apple 平台版）跑通，再評估 **B16** Core ML（目標改為 SenseVoice）、**B11** 模型體積
 3. **B13** 公開前替換 macOS 系統語音產生的測試 fixture（要公開 repo 時才必要）
 4. 有空再做：B8 閒置重量執行緒、B10、B12、B15
 - SenseVoice 執行緒數：2 執行緒結果不變、說完 → 完整結果 −30~50 ms（progress.md 2026-11-02「SenseVoice 偽串流的執行緒數」，分支 `feat/sv-threads`）；已改為預設（2026-11-02）
