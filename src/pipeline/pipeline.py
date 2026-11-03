@@ -44,8 +44,12 @@ def _default_vad() -> VadConfig:
     # 舊的單一門檻：VadConfig(min_silence_ms=500)（命令列 --min-silence-ms 500 --pause-ms 0）。
     # 其餘參數維持上游 Silero 預設值。VAD 模組本身的預設值不變。
     # 2026-11-01 B9：pause 150（實際 160 ms）可讓 0.2 s 的句間停頓也出暫定結果（連續集 1314 → 232 ms），
-    # 代價是半句暫定結果的句子 36 → 40 %、解碼量 +3–8 %；是否改預設待決定（--pause-ms 150）。
-    return VadConfig(min_silence_ms=1000, pause_ms=150)
+    # 代價是半句暫定結果的句子 36 → 40 %、解碼量 +3–8 %（2026-11-01 改為預設）。
+    # 2026-11-03 定稿門檻 1000 → 700 ms（車艙短指令；docs/progress.md「min_silence 定稿門檻掃描」）：
+    # 短句子集（≤ 3 s）說完 → 定稿 1054 → 734 ms、0 句被切開、最終文字逐句相同；代價是 4–5 s 的
+    # 朗讀長句被切開 2 → 8 %（冒煙集 CER +0.37 個百分點）。門檻只在 AISHELL 朗讀語音上調過，
+    # 口語的猶豫停頓可能更長，見 docs/limitations.md。
+    return VadConfig(min_silence_ms=700, pause_ms=150)
 
 
 @dataclass(frozen=True)

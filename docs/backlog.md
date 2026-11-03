@@ -2,6 +2,7 @@
 
 持續更新的清單：已知問題、要做的優化、優先順序。做完的項目移到最下方「已完成」，並在 [progress.md](progress.md) 寫實驗紀錄。數字出自 2026-10-30 的 AISHELL-1 掃描（commit `f576d57`），細節見 progress.md。
 
+**2026-11-03**：定稿門檻 min_silence 1000 → 700 ms、SenseVoice 關 spinning 改為預設；VAD 觸發不改。**泛化局限**：全部優化只在 AISHELL-1 小集合（朗讀）上驗證，見 [limitations.md](limitations.md)；B6a（跨領域 / 自錄車艙口語評測）在算力允許時恢復。
 **目前狀態（2026-11-02）**：**預設模型改為 SenseVoice 偽串流 `sensevoice-small-int8-ort-p480-960-max3-zh`，2 執行緒**（使用者決定；200 句 CER 3.43 vs X-ASR 4.80%、首字 400 vs 1006 ms、RTF 0.033，代價見 progress.md 同日兩節「決定」），X-ASR 480 ms INT8 + onnxruntime 1.31.1 保留為選項（峰值 RSS 541 → 353 MB）、結束判定 A2（pause 150 / min_silence 1000）、greedy search 批次 joiner；SenseVoice 支援熱詞（CTC prefix beam search，選項）。B1 推論端已到頭，B9 方案定案，B8 CPU 調校無可再調。未合併的實驗分支（small CTC、偽串流降計算量、B4 車內噪音、B11 評測 RSS、B7 取消 FP32）見 progress.md「未合併分支的實驗紀錄」。2026-11-02 已完成：B0 麥克風真實延遲（模擬值可代表真實路徑）、B14 partial 穩定度（偽串流跳動是 X-ASR 的 2–6 倍）、B16 CoreML EP 前哨（官方 INT8 不加速）。
 **暫緩（使用者決定，2026-11-01）**：噪音測試加強（SNR 定義）、跨領域評測集（B6a）等垂直領域適配——真實車艙有 SSE 語音增強前端；X-ASR 熱詞、n-gram LM、偽串流 partial 只用 greedy / beam search 改 C++（見 B15）。
 **2026-10-30**：第一階段全鏈路已完成（tag `v1`，commit `f6b11a8`），開始逐項處理下列問題。麥克風路徑直接使用 `StreamingPipeline`，對 pipeline 的改動（VAD 預先啟動、斷句）會自動套用到麥克風。
@@ -69,7 +70,7 @@
 - **部分完成（2026-10-31）**：端到端首字延遲（前補 1 秒靜音）與 VAD 無關但只適合相對比較；300 句 MFA 字級對齊集（`scripts/prepare_alignment.py`）提供真實首字起點，VAD 起點平均早 26 ms（P90 0–2 ms）。對齊誤差待人工抽查；完整版仍待 B4 的合成長音訊集。
 - **完成標準**：docs/eval.md 的定義更新，並報告兩種起點的差距分佈。
 
-### B6a　評測集與任何模型訓練資料都不重疊（暫緩，原 P1；2026-11-01 使用者決定垂直領域 / 跨領域評測先不做）
+### B6a　評測集與任何模型訓練資料都不重疊（暫緩至算力允許，P1；高風險項與驗證計畫見 [limitations.md](limitations.md)）
 
 - **現況**：B6 查證結果（[models.md](models.md)）：X-ASR 是否用過 AISHELL-1 train / test **未知**，官方只說「約 100 萬小時開源及收集語音」。AISHELL-1 上的 X-ASR CER 無法當作泛化能力。
 - **做法**：B4 的合成長音訊集改用自錄句子（或其他確定不在訓練資料中的語料）為來源，作為「保證跨領域」的評測集。X-ASR 技術報告（README 標示 Coming Soon）公布後再查一次訓練資料清單。

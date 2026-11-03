@@ -2106,3 +2106,26 @@ Apple M5（Mac17,3）、macOS 27.0.1、Python 3.11.15、onnxruntime 1.31.1；分
 - 只跑小集合（對齊 300 / 短句 100 / 連續 77 條 / 車內 −5 dB 77 條）；機器負載高（load 9–15），可見首字的絕對值可能偏高，相對差主要來自排程。
 - 只量 SenseVoice 偽串流；X-ASR 的結論（不受 VAD 限制）不變。
 - 「第一個字錯」對使用者的影響沒有主觀評估。
+
+---
+
+## 2026-11-03　決定：定稿門檻 700 ms、SenseVoice 關 spinning；記錄泛化局限
+
+使用者決定（「把之前有效的改動也留下」，並先記錄局限性）。合併 `feat/sv-mem-cpu`、`feat/min-silence`、`feat/vad-trigger`，採用：
+
+- **min_silence 1000 → 700 ms**（`src/pipeline/pipeline.py` 的 `_default_vad()`）。
+- **SenseVoice onnxruntime session 加 `session.intra_op.allow_spinning=0`**（`SenseVoiceOrtAsr` 預設；自訂 `sess_options` 時不套用）。
+- VAD 觸發（min_speech 96 + first_s 0.32）**不改預設**：首字 −145 ms，但第一個 partial 首字正確率 85 → 56%，且誤觸發只在無瞬態噪音的資料上量過。量測腳本與登記的參數組合保留。
+
+**小集合驗證**（load average 約 1.8–2.2）：
+
+| 集合 | min_silence | CER % | 每條切段 mean（max） | 尾字延遲 mean (ms) | RTF | 首字 mean (ms) |
+|---|---|---|---|---|---|---|
+| 短句子集 100 句 | 1000 | 2.49 | 1.00（1） | 998 | 0.027 | 401 |
+| | **700** | **2.49** | **1.00（1）** | **678** | — | — |
+| 200 句冒煙集 | 1000（前一預設） | 3.43 | 1.02（3） | 998 | 0.033 | 400 |
+| | **700** | 3.80 | 1.09（3） | 678 | 0.032 | 400 |
+
+短句子集上 0 句被切開、CER 相同，尾字延遲 −320 ms，與 `feat/min-silence` 的結果一致；冒煙集（4–5 s 朗讀長句）CER +0.37 個百分點（顯著）是已知代價。測試：fixture 兩句間隔 1.0 s，預設改為切成兩段（`test_end_to_end_default_splits_one_second_gap`），原本「1000 ms 合成一段、恢復時重新解碼」的測試改用明確的 1000 ms 設定保留。pytest 202 個、mypy、ruff 通過。
+
+**泛化局限**另寫成 [limitations.md](limitations.md)：所有優化都只在 AISHELL-1 小集合（朗讀語音）上驗證；定稿門檻 700 ms、VAD 觸發、模型選擇是高風險項，之後在 3000 句、自錄車艙口語指令與公開口語 / 車載語料上重驗。

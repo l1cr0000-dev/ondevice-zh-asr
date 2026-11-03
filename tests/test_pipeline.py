@@ -219,7 +219,7 @@ def test_finalize_mode_without_resume_keeps_provisional_as_final() -> None:
 def test_default_is_two_threshold_finalize() -> None:
     # 預設 = B9 方案 A2（pause 150）：停頓 150 ms 先 finalize 出暫定結果，靜音 1000 ms 定稿
     config = PipelineConfig()
-    assert (config.vad.pause_ms, config.vad.min_silence_ms) == (150, 1000)
+    assert (config.vad.pause_ms, config.vad.min_silence_ms) == (150, 700)
     assert config.provisional == "finalize"
     audio = _tones((1.0, 2.0), total_s=3.5)
     (utt,), asr = _run_fake(audio, config)
@@ -325,19 +325,34 @@ def test_end_to_end_two_utterances(models: tuple[SileroVadModel, StreamingAsr]) 
     assert utts[0].final_s is not None and utts[0].final_s < utts[1].start_emitted_s
 
 
-def test_end_to_end_default_gives_provisional_per_sentence(
+def test_end_to_end_two_threshold_gives_provisional_per_sentence(
     models: tuple[SileroVadModel, StreamingAsr],
 ) -> None:
-    # 預設兩段門檻（A2）：兩句合成一段定稿，但第一句說完 200 ms 就先有暫定結果
+    # 兩段門檻（A2）、定稿門檻 1000 ms：fixture 兩句間隔 1.0 s，合成一段定稿，
+    # 但第一句說完 200 ms 內就先有暫定結果，第二句開始時重新解碼
     vad_model, asr = models
     truth = json.loads(SPEECH_WAV.with_suffix(".json").read_text())["segments"]
-    (utt,) = transcribe(load_wav(SPEECH_WAV), vad_model, asr, chunk_ms=10)
+    config = PipelineConfig(VadConfig(min_silence_ms=1000, pause_ms=150))
+    (utt,) = transcribe(load_wav(SPEECH_WAV), vad_model, asr, config, chunk_ms=10)
     assert jiwer.cer("".join(REFERENCES), utt.text) <= 0.15, utt.text
     first, *_, last = utt.provisionals
     assert jiwer.cer(REFERENCES[0], first.text) <= 0.15, first.text
     assert first.emitted_s - truth[0]["end"] < 0.5
     assert last.text == utt.text and utt.final_s is not None and last.emitted_s < utt.final_s
     assert len(utt.resume_redecode_s) == 1
+
+
+def test_end_to_end_default_splits_one_second_gap(
+    models: tuple[SileroVadModel, StreamingAsr],
+) -> None:
+    # 預設定稿門檻 700 ms：1.0 s 的句間停頓切成兩段，各自先出暫定結果再定稿
+    vad_model, asr = models
+    utts = transcribe(load_wav(SPEECH_WAV), vad_model, asr, chunk_ms=10)
+    assert len(utts) == 2
+    for utt, ref in zip(utts, REFERENCES, strict=True):
+        assert jiwer.cer(ref, utt.text) <= 0.15, utt.text
+        assert utt.provisionals and utt.final_s is not None
+        assert utt.provisionals[-1].emitted_s < utt.final_s
 
 
 def test_end_to_end_independent_of_chunk_size(

@@ -95,7 +95,7 @@ uv run scripts/run_pipeline.py [input.wav] -o out.json  # VAD + ASR：每句文�
 uv run scripts/demo_mic.py                # 麥克風即時辨識，Ctrl+C 結束並印出首字延遲統計
 ```
 
-預設的結束判定是兩段門檻（方案 A2）：句中靜音 150 ms 先 finalize 出暫定結果（標「（暫定）」），靜音滿 1000 ms 才定稿；暫定結果之後若又開始說話，會重新解碼整句並修正。上面三個腳本與 `eval/run_eval.py` 都可用 `--min-silence-ms 500 --pause-ms 0` 退回舊的單一門檻 500 ms。
+預設的結束判定是兩段門檻（方案 A2）：句中靜音 150 ms 先 finalize 出暫定結果（標「（暫定）」），靜音滿 700 ms 才定稿（2026-11-03 起，原為 1000 ms，針對車艙短指令）；暫定結果之後若又開始說話，會重新解碼整句並修正。上面三個腳本與 `eval/run_eval.py` 都可用 `--min-silence-ms 500 --pause-ms 0` 退回舊的單一門檻 500 ms。
 
 ```bash
 ```
@@ -189,6 +189,8 @@ CPU、單執行緒、10 ms chunk 模擬即時、暖機 3 句、每條前補 1 �
 完整 4 × 4 掃描、信賴區間與取捨分析見 [docs/progress.md](docs/progress.md)；指標定義與文字正規化規則見 [docs/eval.md](docs/eval.md)。
 
 ## 已知限制
+
+**泛化性**：所有優化與預設參數都只在 AISHELL-1 小集合（200 / 300 句、朗讀語音）上驗證，與車艙的自然口語指令差距很大；各項優化的泛化風險與之後要做的驗證見 [docs/limitations.md](docs/limitations.md)。風險最高的是定稿門檻 700 ms（口語的猶豫停頓可能被誤切）。
 
 **評測方法**
 

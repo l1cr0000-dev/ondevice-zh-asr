@@ -288,6 +288,9 @@ class SenseVoiceOrtAsr(_WholeUtteranceAsr):
             opts = ort.SessionOptions()
             opts.intra_op_num_threads = self.config.num_threads
             opts.inter_op_num_threads = 1
+            # 關掉執行緒等待時的 spinning：全鏈路 CPU 時間 −6~14 %，延遲、記憶體、結果逐句不變
+            # （docs/progress.md 2026-11-03「SenseVoice onnxruntime session 選項」）
+            opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
         # 以檔案路徑建立 session（不先讀進記憶體），見模組說明
         self._session: Any = ort.InferenceSession(
             str(self._paths["model"]), opts, providers=["CPUExecutionProvider"]

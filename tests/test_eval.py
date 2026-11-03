@@ -238,8 +238,8 @@ def test_run_eval_end_to_end(tmp_path: Path) -> None:
     res = json.loads(result_file.read_text(encoding="utf-8"))
     m = res["metrics"]
     assert m["cer"] <= 0.15
-    # fixture 兩句間隔 1.0 s，預設 min_silence 1000 ms 不切開，第一句以暫定結果先給出
-    assert m["segments_per_utterance"]["max"] == 1
+    # fixture 兩句間隔 1.0 s，預設定稿門檻 700 ms 會切成兩段
+    assert m["segments_per_utterance"]["max"] == 2
     assert 0 < m["first_token_latency_ms"]["mean"] < 2000
     assert res["config"]["lead_silence_ms"] == 1000 and res["config"]["tail_silence_ms"] == 1500
     assert result_file.stem.endswith(
@@ -247,8 +247,8 @@ def test_run_eval_end_to_end(tmp_path: Path) -> None:
     )  # 預設兩段門檻（A2，pause 150）
     (utt,) = res["utterances"]
     assert utt["processed_s"] == pytest.approx(utt["duration_s"] + 2.5, abs=1e-3)
-    # 句尾補足靜音後，最後一句由 VAD 靜音計時收尾：尾字延遲 ≈ min_silence（預設 1000 ms）
-    assert m["tail_latency_ms"]["mean"] >= 1000
+    # 句尾補足靜音後，最後一句由 VAD 靜音計時收尾：尾字延遲 ≈ min_silence（預設 700 ms，減去 VAD 終點的 padding）
+    assert m["tail_latency_ms"]["mean"] >= 650
     for seg in utt["segments"]:
         assert seg["end_emitted_s"] <= seg["final_s"]
         assert seg["final_text_ready_s"] <= seg["final_s"]
