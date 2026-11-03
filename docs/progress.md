@@ -2351,3 +2351,7 @@ scripts/compare_ios_app.py      iPhone 自動驗證 JSON 與 Mac 參考輸出的
 - 截圖：`docs/ios-app-simulator.png`（wav 模擬按住說話，自動驗證執行中）。
 - `ptt` 第一輪的 RTF（0.096）與載入時間（0.92 s）比之後的單檔重跑（0.041 / 0.55 s）高，原因未查（模擬器剛開機的冷啟動可能性大）；以 stream 與單檔重跑為準。
 
+### 真機（iPhone 13 Pro Max，UDID 00008110-000A50213A61401E）
+
+- 開發者模式已開；裝置需解鎖才能建置（鎖定時 xcodebuild 逾時）。`scripts/build_ios_app.sh --device` 用 Team 736HS34H28 自動簽名成功，app 269 MB（含模型 231 MB），`devicectl device install app` 安裝成功。
+- **卡在信任憑證**：`devicectl device process launch` 回 FBSOpenApplicationErrorDomain error 3（profile 尚未被使用者信任）。需在 iPhone 上「設定 → 一般 → VPN 與裝置管理 → 開發者 App → 點選 Apple Development 帳號 → 信任」，之後重跑啟動、取回 JSON 即可。真機指標（首字、放開→定稿、RTF、峰值記憶體、載入時間）**尚未量測**。
