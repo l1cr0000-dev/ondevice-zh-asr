@@ -166,6 +166,8 @@
 
 ### B15　熱詞與語言模型的後續（暫緩）
 
+- **2026-11-03**：C++ 核心（Mac / iPhone app）的熱詞也暫緩（使用者決定：還沒有適配場景與詞表）。iPhone 麥克風實測時專有名詞會認錯，恢復時先收集「說的是 X、認成 Y」的清單當測試案例；C++ 擴充點已留好（`CtcDecoder`、`SenseVoiceAsr::set_decoder`），Python 版實作在 `src/asr/ctc_decode.py`。
+
 - **已做（2026-11-01）**：SenseVoice 熱詞，`src/asr/ctc_decode.py`（CTC prefix beam search + Aho-Corasick 加分），beam 8、score 1.5–2：300 句熱詞句 CER 6.24 → 3.98%（顯著），非熱詞句 0 句改變，每句解碼 +5.6 ms（模型計算量的約 4.5%）。`HotwordGraph` 與模型無關，CTC beam search 可直接用於其他 CTC 模型。
 - **暫緩（使用者決定）**：
   - X-ASR 熱詞：greedy 換 modified beam search，`HotwordGraph` 可重用。
