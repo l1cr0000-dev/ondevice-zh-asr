@@ -6,12 +6,15 @@ finalize 都是這個計算（對已累積的音訊整段辨識），所以它�
 - 從 manifest 取音訊長度 ≥ L 的句子，截取前 L 秒（與偽串流 partial 看到的前綴相同），每個長度最多 `--per-length` 句。
 - 分別計時：fbank + LFR + CMVN（`features`）、模型推論（`session.run`）、整次辨識（含 CTC greedy），
   以及整次辨識的程序 CPU 時間（`cpu`，所有執行緒合計，含 spinning；多執行緒省下牆鐘時間的 CPU 代價）。
+- 記憶體（`scripts/probe_footprint.py` 的 `snapshot`，vmmap）：載入前、載入後、暖機時每個長度跑完後、
+  計時後的 RSS / physical footprint（iOS jetsam 的依據）/ malloc 存活與碎片，及程序生命期的峰值。
 - 結果：全部片段的辨識文字雜湊，以及和第一個設定不同的片段數（多執行緒可能改變浮點累加順序）。
 
 每個設定在獨立子程序中執行（先整批暖機一次）；`--repeat N` 時各設定交錯重跑 N 輪，計時取各輪中位數。
 
     uv run scripts/bench_sv_compute.py                                   # 執行緒 1 / 2 / 4，預設 session 選項
     uv run scripts/bench_sv_compute.py --threads 1 2 4 --preset default no-spin --repeat 3
+    uv run scripts/bench_sv_compute.py --threads 2 --preset default no-arena arena-shrink --repeat 3
 """
 
 import argparse
@@ -28,12 +31,92 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "scripts"))  # 共用其他腳本的函式（probe_footprint 等）
 
-# session 選項預設組：名稱 → 對 ort.SessionOptions 的修改
-PRESETS: dict[str, Callable[[Any], None]] = {
-    "default": lambda o: None,  # spinning 開
-    "no-spin": lambda o: o.add_session_config_entry("session.intra_op.allow_spinning", "0"),
+
+# session 選項預設組：名稱 → 對 ort.SessionOptions 的修改，回傳每次推論用的 ort.RunOptions（None = 不給）
+def _arena_same_as_requested(o: Any) -> None:
+    """CPU arena 改為「要多少擴多少」（kSameAsRequested，預設 kNextPowerOfTwo 會成倍擴張）。
+
+    Python 的 CPU EP 不收 arena 設定，只能在程序層級註冊一個共用 allocator 再讓 session 使用；
+    每個設定都在獨立子程序中跑，不影響其他設定。
+    """
+    import onnxruntime as ort  # type: ignore[import-untyped]
+
+    info = ort.OrtMemoryInfo(
+        "Cpu", ort.OrtAllocatorType.ORT_ARENA_ALLOCATOR, 0, ort.OrtMemType.DEFAULT
+    )
+    ort.create_and_register_allocator(info, ort.OrtArenaCfg({"arena_extend_strategy": 1}))
+    o.add_session_config_entry("session.use_env_allocators", "1")
+
+
+def _shrink_arena() -> Any:
+    """每次推論結束後把 CPU arena 中未使用的區塊還給系統（run 選項）。"""
+    import onnxruntime as ort
+
+    run = ort.RunOptions()
+    run.add_run_config_entry("memory.enable_memory_arena_shrinkage", "cpu:0")
+    return run
+
+
+def _set(**attrs: Any) -> Callable[[Any], None]:
+    def apply(o: Any) -> None:
+        for k, v in attrs.items():
+            setattr(o, k, v)
+
+    return apply
+
+
+def _no_spin(o: Any) -> None:
+    o.add_session_config_entry("session.intra_op.allow_spinning", "0")
+
+
+def _no_prepack(o: Any) -> None:
+    o.add_session_config_entry("session.disable_prepacking", "1")
+
+
+def _opt_level(name: str) -> Callable[[Any], None]:
+    def apply(o: Any) -> None:
+        import onnxruntime as ort
+
+        o.graph_optimization_level = getattr(ort.GraphOptimizationLevel, name)
+
+    return apply
+
+
+def _preset(*steps: Callable[[Any], None], shrink: bool = False) -> Callable[[Any], Any]:
+    def apply(o: Any) -> Any:
+        for step in steps:
+            step(o)
+        return _shrink_arena() if shrink else None
+
+    return apply
+
+
+PRESETS: dict[str, Callable[[Any], Any]] = {
+    "default": _preset(),  # spinning 開、arena 開、mem pattern 開、圖最佳化全開
+    "no-spin": _preset(_no_spin),
+    "no-arena": _preset(_set(enable_cpu_mem_arena=False)),
+    "no-mempattern": _preset(_set(enable_mem_pattern=False)),
+    "no-arena-no-mempattern": _preset(_set(enable_cpu_mem_arena=False, enable_mem_pattern=False)),
+    "arena-same": _preset(_arena_same_as_requested),
+    "arena-shrink": _preset(shrink=True),
+    "no-prepack": _preset(_no_prepack),
+    "opt-basic": _preset(_opt_level("ORT_ENABLE_BASIC")),
+    "opt-extended": _preset(_opt_level("ORT_ENABLE_EXTENDED")),
+    # 組合：關 spinning + 關 arena（若兩者各自有效）
+    "no-spin-no-arena": _preset(_no_spin, _set(enable_cpu_mem_arena=False)),
 }
+
+
+def session_options(threads: int, preset: str) -> tuple[Any, Any]:
+    """預設組 → (ort.SessionOptions, ort.RunOptions 或 None)。threads / inter_op 與 SenseVoiceOrtAsr 預設相同。"""
+    import onnxruntime as ort
+
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = threads
+    opts.inter_op_num_threads = 1
+    return opts, PRESETS[preset](opts)
 
 
 def _summary(xs: list[float]) -> dict[str, float]:
@@ -49,17 +132,17 @@ def _summary(xs: list[float]) -> dict[str, float]:
 def worker(
     threads: int, preset: str, manifest: Path, lengths: list[float], per_length: int
 ) -> dict[str, Any]:
-    import onnxruntime as ort  # type: ignore[import-untyped]
+    from probe_footprint import snapshot
 
-    from src.asr import SenseVoiceOrtAsr
+    from src.asr import SenseVoiceConfig, SenseVoiceOrtAsr
     from src.audio import SAMPLE_RATE
     from src.vad import load_wav
 
-    opts = ort.SessionOptions()
-    opts.intra_op_num_threads = threads
-    opts.inter_op_num_threads = 1
-    PRESETS[preset](opts)
-    asr = SenseVoiceOrtAsr(sess_options=opts)
+    mem = [snapshot("載入前")]
+    opts, run_opts = session_options(threads, preset)
+    # 語言與預設模型相同（zh）
+    asr = SenseVoiceOrtAsr(SenseVoiceConfig(language="zh"), sess_options=opts, run_options=run_opts)
+    mem.append(snapshot("載入後"))
 
     rows = [json.loads(x) for x in manifest.read_text(encoding="utf-8").splitlines() if x.strip()]
     wavs = [load_wav(manifest.parent / r["wav"]) for r in rows]
@@ -68,7 +151,10 @@ def worker(
         n = round(length * SAMPLE_RATE)
         clips[length] = [w[:n] for w in wavs if len(w) >= n][:per_length]
 
-    def run_all() -> tuple[dict[float, dict[str, list[float]]], list[str]]:
+    def run_all(
+        label: str = "",
+    ) -> tuple[dict[float, dict[str, list[float]]], list[str]]:
+        """label 非空時，每個長度跑完記一次記憶體（長度由短到長，看記憶體隨音訊長度的增長）。"""
         times: dict[float, dict[str, list[float]]] = {}
         texts: list[str] = []
         for length, xs in clips.items():
@@ -89,15 +175,19 @@ def worker(
                 t["cpu"].append((c3 - c1) * 1000)
                 texts.append(text)
                 del feats
+            if label:
+                mem.append(snapshot(f"{label} {length:g} s 後"))
         return times, texts
 
-    run_all()  # 暖機
+    run_all("暖機")  # 暖機
     times, texts = run_all()
+    mem.append(snapshot("計時後"))
     return {
         "threads": threads,
         "preset": preset,
         "clips": {str(k): len(v) for k, v in clips.items()},
         "ms": {str(k): {p: _summary(v) for p, v in t.items()} for k, t in times.items()},
+        "memory": mem,
         "texts_md5": hashlib.md5(json.dumps(texts).encode()).hexdigest(),
         "texts": texts,
     }
@@ -112,6 +202,22 @@ def _median_run(runs: list[dict[str, Any]]) -> dict[str, Any]:
         }
         for length, parts in runs[0]["ms"].items()
     }
+    out["memory"] = [
+        {
+            k: (v if k == "label" else statistics.median(r["memory"][i][k] for r in runs))
+            for k, v in snap.items()
+        }
+        for i, snap in enumerate(runs[0]["memory"])
+    ]
+    # 各輪的峰值（看記憶體數字的分散程度）與 5 s 的 CPU 時間
+    out["rounds"] = [
+        {
+            "footprint_peak": r["memory"][-1]["footprint_peak"],
+            "peak_rss": r["memory"][-1]["peak_rss"],
+            "cpu_longest": r["ms"][list(r["ms"])[-1]]["cpu"]["mean"],
+        }
+        for r in runs
+    ]
     out["repeats"] = len(runs)
     out["texts_stable_across_repeats"] = len({r["texts_md5"] for r in runs}) == 1
     return out
@@ -176,6 +282,24 @@ def main() -> int:
         print(
             f"| {res['threads']} | {res['preset']} | {cells} | {sess:.1f} | {cpu:.1f} "
             f"| {res['texts_differ_from_first']} | {res['texts_stable_across_repeats']} |"
+        )
+    print("\n記憶體（MB，各輪中位數）：載入前 → 載入後 → 暖機各長度後 → 計時後")
+    print("| threads | preset | 載入前 footprint | 載入後 RSS / footprint | 暖機後 footprint（各長度） | 計時後 RSS / footprint "
+          "| peak RSS | footprint 峰值 | malloc 存活 / 碎片（計時後） |")  # fmt: skip
+    print("|---|---|---|---|---|---|---|---|---|")
+    for res in results:
+        m = {s["label"]: s for s in res["memory"]}
+        load, end = m["載入後"], m["計時後"]
+        warm = " / ".join(
+            f"{s['footprint']:.0f}" for s in res["memory"] if s["label"].startswith("暖機")
+        )
+        print(
+            f"| {res['threads']} | {res['preset']} | {m['載入前']['footprint']:.0f} "
+            f"| {load['rss']:.0f} / {load['footprint']:.0f} "
+            f"| {warm} | {end['rss']:.0f} / {end['footprint']:.0f} | {end['peak_rss']:.0f} "
+            f"| {end['footprint_peak']:.0f}（各輪 "
+            + " / ".join(f"{r['footprint_peak']:.0f}" for r in res["rounds"])
+            + f"）| {end['malloc_allocated']:.0f} / {end['malloc_frag']:.0f} |"
         )
     args.results_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

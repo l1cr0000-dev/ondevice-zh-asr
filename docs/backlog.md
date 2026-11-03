@@ -123,6 +123,7 @@
   - 評測時峰值 RSS 隨句數增加（X-ASR 200 句 531 MB → 3000 句 618 MB；zh-14M 252 → 333 MB），但單獨解碼 100 → 1000 句只增加 3 MB，增加的部分在評測 / pipeline 端，原因未查。這讓「峰值 RSS」指標混入了評測框架本身，違背 CLAUDE.md 的量測原則。
 - **2026-11-01 SenseVoice**（`scripts/probe_footprint.py`，progress.md）：經 sherpa-onnx 載入後 footprint 850 MB（X-ASR 270），其中約 500 MB 是 ORT 1.28 的載入開銷；同一檔案用 ORT 1.31.1 直接載入只要 +308 MB。改用 ORT ≥ 1.30 後 SenseVoice 與 X-ASR 的差距估計從約 580 MB 縮到約 60 MB（未含推論，推論時約 +3 MB / 秒音訊）。
 - **2026-11-01 已處理**：(1) X-ASR / SenseVoice 改用 onnxruntime 1.31.1 直接推論並設為預設（`x-asr-480ms-int8-ort`），200 句峰值 RSS 541 → 353 MB，結果與 sherpa-onnx 版逐句相同；(2) 評測峰值 RSS 隨句數上升已查明是推論暖機（malloc 碎片、程式碼分頁），改以最長 20 句暖機（分支 `feat/b11-eval-rss`，未合併）。**剩下**：模型體積 163.6 MB，留到第二階段 Core ML；輕量備選 small CTC（27 MB、RSS 約 183 MB，CER 約 2 倍）在分支 `feat/light-ctc`。
+- **2026-11-03 SenseVoice session 選項**（分支 `feat/sv-mem-cpu`，未合併，progress.md）：arena / mem pattern / arena 擴張策略 / prepacking / 圖最佳化都無法在不付代價下降低峰值；關 arena 讓全鏈路峰值反而 +22~43 MB。關 spinning 讓 CPU −6~14%，延遲與結果不變（建議，未改預設）。要降峰值應縮短單次整段辨識的音訊長度或等 Core ML。
 - **原做法**：(1) 等 sherpa-onnx 改用 ORT ≥ 1.30，或自行以較新的 ORT 編譯 sherpa-onnx，再用 `probe_memory.py` 對比；iOS 端以 phys_footprint（jetsam 依據）而非 RSS 為準；(2) 在 worker 中每 N 句取樣 RSS，找出評測端的增長來源並修正，讓峰值 RSS 與句數無關；(3) 第二階段量化與 Core ML 轉換時一併對比記憶體與體積。
 
 ### B16　Core ML 加速 encoder（P1，第二階段）

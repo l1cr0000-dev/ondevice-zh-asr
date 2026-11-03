@@ -34,3 +34,17 @@ def decoded_audio_ratio(result: dict[str, Any]) -> float:
         for p in seg["provisionals"][: len(seg["resume_redecode_s"])]
     )
     return float(1 + redecoded / total)
+
+
+def full_result_latency_s(utt: dict[str, Any], true_end_s: float) -> float | None:
+    """說完 → 完整結果：真實末字結束 → 第一個涵蓋整句的結果（音訊終點不早於真實末字的暫定結果，
+    或最後一個句段的最終結果，取早者）。都沒有時回傳 None。"""
+    ready = [
+        p["emitted_s"]
+        for seg in utt["segments"]
+        for p in seg["provisionals"]
+        if p["audio_end_s"] >= true_end_s
+    ]
+    if utt["segments"] and utt["segments"][-1]["final_s"] is not None:
+        ready.append(utt["segments"][-1]["final_s"])
+    return min(ready) - true_end_s if ready else None
