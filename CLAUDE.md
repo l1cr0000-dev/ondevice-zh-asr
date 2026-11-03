@@ -21,7 +21,7 @@
 
 ## 硬體限制
 
-- **可用設備**：Apple Silicon Mac（開發機）、iPhone/iPad、Android 真機（2026-11-03 起）。沒有開發板、沒有 NVIDIA GPU。
+- **可用設備**：Apple Silicon Mac（開發機）、iPhone/iPad、Android（2026-11-03 起列入目標，但目前手邊沒有 Android 設備，Android app 暫緩）。沒有開發板、沒有 NVIDIA GPU。
 - 推論後端只考慮：CPU（ONNX Runtime / sherpa-onnx）；Apple 平台加 Metal（MPS）、Core ML（CPU / GPU / ANE）；Android 平台加 NNAPI / XNNPACK。
 - 不要引入需要 CUDA 的依賴，也不要建議需要上述設備以外硬體驗證的方案。
 

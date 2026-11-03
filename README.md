@@ -6,7 +6,7 @@
 - 串流輸出 partial 結果，以首字延遲為核心優化目標
 - 所有結論都附可複現的量化指標（CER、RTF、首字延遲、峰值記憶體、模型大小）
 
-> 🚧 第一階段（VAD + 串流 ASR + 評測框架）與延遲優化已完成，預設模型為 SenseVoice Small 偽串流（首字約 400 ms、說完到定稿約 680 ms，200 句冒煙集）。量化精度對比暫緩，下一步是**端側適配**：在 Mac app、iPhone、Android 上實際跑起來，見[路線圖](#路線圖)。
+> 🚧 第一階段（VAD + 串流 ASR + 評測框架）與延遲優化已完成，預設模型為 SenseVoice Small 偽串流（首字約 400 ms、說完到定稿約 680 ms，200 句冒煙集）。量化精度對比暫緩。端側適配進行中：C++ 辨識核心、Mac app、iPhone app 已完成（iPhone 13 Pro Max 上首字約 413 ms、RTF 0.048），Android 暫緩（手邊沒有 Android 設備），見[路線圖](#路線圖)。
 
 ## 架構
 
@@ -306,14 +306,14 @@ models/ data/  模型與資料（不進版控，由 scripts/ 下載並校驗）
 - [x] SenseVoice 熱詞（CTC prefix beam search + Aho-Corasick，預設關閉）
 - [x] 評測補強：MFA 真實語音起點（300 句對齊集）、連續多句合成集、partial 穩定度、麥克風路徑實測延遲
 
-**下一步：端側適配**（目標：在 Mac app、iPhone、Android 三個平台上實際跑起來）
+**端側適配**（進行中；目標：在 Mac app、iPhone、Android 三個平台上實際跑起來）
 
 架構：辨識核心（音訊緩衝、Silero VAD 狀態機、A2 結束判定、SenseVoice 偽串流排程、CTC 解碼與熱詞）用 C++ 寫一次，推論用 onnxruntime（macOS / iOS / Android 都有官方預編譯版）；各平台只寫收音與介面（Swift / Kotlin），經 C API 呼叫核心。Python 版保留為參考實作與評測工具。
 
-- [ ] C++ 核心：與 Python 版逐步對齊，以 `tests/fixtures` 的音訊確認 VAD 切點、partial / 暫定 / 定稿文字與 Python 版相同；提供 C API 給 Swift / Kotlin
-- [ ] Mac app（SwiftUI）：AVAudioEngine 收音 → 核心 → 即時顯示 partial / 定稿；先在開發機上量延遲、RTF、記憶體，與 Python 模擬值對比
-- [ ] iPhone app：共用 Mac 版的 Swift 程式碼，真機量測
-- [ ] Android app（Kotlin + JNI）：AudioRecord 收音 → 核心，真機量測
+- [x] C++ 核心：與 Python 版逐步對齊，以 `tests/fixtures` 的音訊確認 VAD 切點、partial / 暫定 / 定稿文字與 Python 版相同；提供 C API 給 Swift / Kotlin
+- [x] Mac app（SwiftUI，按住說話為主）：AVAudioEngine 收音 → 核心 → 即時顯示 partial / 定稿；先在開發機上量延遲、RTF、記憶體，與 Python 模擬值對比
+- [x] iPhone app：共用 Mac 版的 Swift 程式碼，真機量測（iPhone 13 Pro Max，wav 模式；麥克風待使用者實測）
+- [ ] Android app（Kotlin + JNI）：AudioRecord 收音 → 核心，真機量測。**暫緩**（2026-11-03）：手邊沒有 Android 設備；環境已有 Android SDK 37、模擬器映像，還缺 NDK、SDK 的 CMake、onnxruntime-android 1.31.1 AAR（Maven Central，SHA-1 `3c0fccc45f50e684c9d79a8f016f674488377223`），Gradle 首次建置需下載依賴
 - [ ] 平台加速（之後評估）：Apple 用 Core ML（SenseVoice 輸入長度可變，需固定或列舉輸入形狀；partial 最長 3 s 有助於限制形狀），Android 用 NNAPI / XNNPACK
 - [ ] 完成標準：三個平台都能即時辨識車艙指令，各自的指標表（首字 / 尾字延遲、RTF、峰值記憶體、載入時間、App 大小）附機型與系統版本
 
