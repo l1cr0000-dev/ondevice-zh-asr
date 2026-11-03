@@ -29,6 +29,8 @@ int main() {
   cfg.vad_pause_ms = 800;
   CHECK_EQ(ozasr_create(&cfg, &h), OZASR_ERROR_INVALID_ARGUMENT);
 
+  CHECK_EQ(ozasr_finalize_utterance(nullptr), OZASR_ERROR_INVALID_ARGUMENT);
+
   // NULL handle 的呼叫安全
   ozasr_destroy(nullptr);
   CHECK_EQ(ozasr_accept_waveform(nullptr, nullptr, 0), OZASR_ERROR_INVALID_ARGUMENT);

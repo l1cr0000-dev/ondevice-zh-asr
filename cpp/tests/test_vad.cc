@@ -39,6 +39,25 @@ int main() {
   CHECK_EQ(events[4].sample, 36 * 512 + 480);
   CHECK_EQ(events[4].detected_at, 58 * 512);  // 靜音 22 frame = 704 ms ≥ 700 ms
 
+  // force_end：語音進行中（第一段，frame 20 左右）強制結束 → 立刻 End，之後可繼續送入
+  {
+    ScriptedVad model(two_part_script());
+    StreamingVad vad(&model, cfg);
+    std::vector<float> audio(20 * 512, 0.0f);
+    std::vector<VadEvent> ev;
+    for (size_t i = 0; i < audio.size(); i += 160) {
+      auto e = vad.accept_waveform(audio.data() + i, std::min<size_t>(160, audio.size() - i));
+      ev.insert(ev.end(), e.begin(), e.end());
+    }
+    CHECK_EQ(ev.size(), static_cast<size_t>(1));  // 只有 Start
+    const auto fe = vad.force_end();
+    CHECK_EQ(fe.size(), static_cast<size_t>(1));
+    CHECK(fe[0].kind == VadEvent::End);
+    CHECK_EQ(fe[0].detected_at, static_cast<int64_t>(20 * 512));
+    CHECK(fe[0].sample <= fe[0].detected_at);
+    CHECK(vad.force_end().empty());  // 沒有進行中的句子 → 無事件
+  }
+
   // 結果與 chunk 大小無關
   for (size_t chunk : {1u, 7u, 160u, 512u, 5000u}) {
     const auto e2 = run(two_part_script(), cfg, chunk);

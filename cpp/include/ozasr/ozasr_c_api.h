@@ -10,6 +10,7 @@
  *   ozasr_event ev;
  *   while (ozasr_next_event(h, &ev) == 1) { ... }
  *   ozasr_flush(h);   // 輸入結束，結束進行中的句子；之後要再用請 ozasr_reset
+ *   ozasr_finalize_utterance(h);   // 按住說話放開：立刻定稿，之後可繼續 accept_waveform
  *   ozasr_destroy(h);
  *
  * 執行緒：同一個 handle 不可同時從多個執行緒呼叫；不同 handle 互相獨立。
@@ -93,6 +94,10 @@ OZASR_API void ozasr_destroy(ozasr_handle* handle);
 OZASR_API ozasr_status ozasr_reset(ozasr_handle* handle);
 OZASR_API ozasr_status ozasr_accept_waveform(ozasr_handle* handle, const float* samples, size_t num_samples);
 OZASR_API ozasr_status ozasr_flush(ozasr_handle* handle);
+/* 立刻結束目前句子並定稿（按住說話放開）：不等 vad_min_silence_ms；句子在停頓中則以暫定結果定稿。
+ * 與 ozasr_flush 不同，之後可直接繼續 ozasr_accept_waveform（下一次按住），不需 ozasr_reset。
+ * 沒有進行中的句子（尚未觸發 VAD、或候選語音不足 vad_min_speech_ms）時不產生事件。結果用 ozasr_next_event 取出。 */
+OZASR_API ozasr_status ozasr_finalize_utterance(ozasr_handle* handle);
 /* 取出一個事件：回傳 1 = 有事件（寫入 *event）、0 = 沒有、< 0 = 錯誤 */
 OZASR_API int ozasr_next_event(ozasr_handle* handle, ozasr_event* event);
 OZASR_API ozasr_status ozasr_get_stats(ozasr_handle* handle, ozasr_stats* stats);

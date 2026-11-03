@@ -137,6 +137,11 @@ ozasr_status ozasr_flush(ozasr_handle* h) {
   return guarded(h, [&] { push(h, h->pipeline->flush()); });
 }
 
+ozasr_status ozasr_finalize_utterance(ozasr_handle* h) {
+  if (!h) return OZASR_ERROR_INVALID_ARGUMENT;
+  return guarded(h, [&] { push(h, h->pipeline->finalize_utterance()); });
+}
+
 int ozasr_next_event(ozasr_handle* h, ozasr_event* ev) {
   if (!h || !ev) return -1;
   if (h->events.empty()) return 0;

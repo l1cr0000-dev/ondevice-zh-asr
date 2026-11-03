@@ -125,6 +125,16 @@ std::vector<VadEvent> StreamingVad::flush() {
   return events;
 }
 
+std::vector<VadEvent> StreamingVad::force_end() {
+  std::vector<VadEvent> events;
+  if (state_ == State::Speech) {
+    events.push_back(end_event(std::min(last_speech_end_ + pad_, received_), received_));
+  }
+  state_ = State::Silence;
+  paused_ = false;
+  return events;
+}
+
 VadEvent StreamingVad::start_event(int64_t detected_at) {
   state_ = State::Speech;
   const int64_t start = std::max<int64_t>({speech_start_ - pad_, prev_end_, 0});

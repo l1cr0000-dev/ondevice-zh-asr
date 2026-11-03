@@ -99,6 +99,51 @@ int main() {
   p.reset();
   CHECK(p.utterances().empty());
   CHECK(!p.in_speech());
+  // finalize_utterance：句子進行中放開 → 立刻定稿，且之後可繼續送入（不需 reset）
+  {
+    double t = 0;
+    ScriptedVad v(two_part_script());
+    LengthRecognizer a;
+    Pipeline q(&v, &a, cfg, [&] { return t; });
+    std::vector<float> audio(20 * 512, 0.0f);
+    std::vector<PipelineEvent> ev;
+    for (size_t i = 0; i < audio.size(); i += 160) {
+      auto e = q.accept_waveform(audio.data() + i, std::min<size_t>(160, audio.size() - i));
+      ev.insert(ev.end(), e.begin(), e.end());
+    }
+    CHECK(q.in_speech());
+    const auto fin_ev = q.finalize_utterance();
+    CHECK_EQ(fin_ev.size(), static_cast<size_t>(1));
+    CHECK(fin_ev[0].kind == PipelineEvent::Final);
+    CHECK(fin_ev[0].text.size() > 1);  // "n<樣本數>"
+    CHECK_NEAR(fin_ev[0].audio_pos_s, 20.0 * 512 / 16000, 1e-9);  // 在放開當下就定稿，沒有等 700 ms
+    CHECK(!q.in_speech());
+    CHECK_EQ(q.utterances().size(), static_cast<size_t>(1));
+    CHECK(q.finalize_utterance().empty());
+    // 之後可繼續送入
+    auto more = q.accept_waveform(audio.data(), 160);
+    CHECK(more.empty());
+  }
+
+  // 句中停頓（已出暫定結果）時放開：直接以暫定結果定稿，不再解碼
+  {
+    double t = 0;
+    ScriptedVad v(two_part_script());
+    LengthRecognizer a;
+    Pipeline q(&v, &a, cfg, [&] { return t; });
+    std::vector<float> audio(31 * 512, 0.0f);
+    std::vector<PipelineEvent> ev;
+    for (size_t i = 0; i < audio.size(); i += 160) {
+      auto e = q.accept_waveform(audio.data() + i, std::min<size_t>(160, audio.size() - i));
+      ev.insert(ev.end(), e.begin(), e.end());
+    }
+    CHECK(ev.back().kind == PipelineEvent::Provisional);
+    const size_t decodes = a.calls.size();
+    const auto fin_ev = q.finalize_utterance();
+    CHECK_EQ(fin_ev.size(), static_cast<size_t>(1));
+    CHECK_EQ(fin_ev[0].text, ev.back().text);
+    CHECK_EQ(a.calls.size(), decodes);
+  }
 
   // 偽串流排程：first 0.48、every 0.96、max 3.0
   PartialSchedule s{0.96, 0.48, 3.0};

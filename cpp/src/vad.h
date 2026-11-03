@@ -59,6 +59,9 @@ class StreamingVad {
   std::vector<VadEvent> accept_waveform(const float* samples, size_t n);
   // 輸入結束：補零處理剩餘樣本，結束進行中的語音段
   std::vector<VadEvent> flush();
+  // 強制結束進行中的語音段（按住說話放開時用）：Speech 狀態立刻發 End，Pending 候選丟棄；
+  // 與 flush() 不同，不補零處理剩餘樣本，之後可以直接繼續送入音訊。
+  std::vector<VadEvent> force_end();
   float last_prob() const { return last_prob_; }
 
  private:
