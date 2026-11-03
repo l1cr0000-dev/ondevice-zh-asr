@@ -1,0 +1,4 @@
+module COzAsr {
+    header "ozasr/ozasr_c_api.h"
+    export *
+}
