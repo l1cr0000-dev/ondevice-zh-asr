@@ -80,6 +80,7 @@ class RunConfig:
         lead += f"_pause{self.pause_ms}" if self.pause_ms else ""
         lead += "fin" if self.pause_ms and self.provisional == "finalize" else ""
         lead += f"_bp{self.blank_penalty:g}" if self.blank_penalty else ""
+        lead += f"_ms{self.vad_min_speech_ms}" if self.vad_min_speech_ms != 250 else ""
         lead += f"_th{self.vad_threshold:g}" if self.vad_threshold != 0.5 else ""
         lead += f"_neg{self.vad_neg_threshold:g}" if self.vad_neg_threshold is not None else ""
         lead += f"_beam{self.beam}" if self.beam != 1 else ""
@@ -487,6 +488,8 @@ def table_row(res: dict[str, Any]) -> str:
     model = f"{c['model']} bp={bp:g}" if bp else c["model"]
     model += f" beam={c['beam']}" if c.get("beam", 1) != 1 else ""
     model += f" hw={c['hotword_score']:g}" if c.get("hotwords") else ""
+    model += f" ms={c['vad_min_speech_ms']}" if c["vad_min_speech_ms"] != 250 else ""
+    model += f" th={c['vad_threshold']:g}" if c["vad_threshold"] != 0.5 else ""
     return (
         f"| {model} | {c['vad_min_silence_ms']} | {c['pre_roll_ms']} "
         f"| {m['cer'] * 100:.2f} | {_ci(m['cer_ci95']['utterance'])} | {m['rtf']:.4f} "
@@ -605,6 +608,13 @@ def print_detail(res: dict[str, Any]) -> None:
                 (
                     f"{sg['files']} 條 / {sg['sentences']} 句，完全切對 {sg['exact_files']} 條，"
                     f"句中誤切 {sg['sentences_split_inside']} 句，漏句 {sg['sentences_missed']} 句"
+                ),
+            ),
+            (
+                "  誤觸發",
+                (
+                    f"{sg['false_triggers']} 段（不與任何句子重疊），其中有輸出文字 "
+                    f"{sg['false_triggers_with_text']} 段 / {sg['false_trigger_chars']} 字"
                 ),
             ),
             (
@@ -751,6 +761,8 @@ def main() -> int:
             model,
             threads_arg or default_threads(model),
             chunk,
+            th,
+            ms,
             sil,
             pre,
             bp,
@@ -759,10 +771,25 @@ def main() -> int:
             beam,
             score if args.hotwords else default_score,
         )
-        for model, threads_arg, chunk, sil, pre, bp, pause, mode, beam, score in itertools.product(
+        for (
+            model,
+            threads_arg,
+            chunk,
+            th,
+            ms,
+            sil,
+            pre,
+            bp,
+            pause,
+            mode,
+            beam,
+            score,
+        ) in itertools.product(
             args.model,
             args.threads,
             args.chunk_ms,
+            args.threshold,
+            args.min_speech_ms,
             args.min_silence_ms,
             args.pre_roll_ms,
             args.blank_penalty,
@@ -780,9 +807,9 @@ def main() -> int:
             threads=threads,
             chunk_ms=chunk,
             pre_roll_ms=pre,
-            vad_threshold=args.threshold,
+            vad_threshold=th,
             vad_neg_threshold=args.neg_threshold,
-            vad_min_speech_ms=args.min_speech_ms,
+            vad_min_speech_ms=ms,
             vad_min_silence_ms=sil,
             vad_speech_pad_ms=args.speech_pad_ms,
             warmup=args.warmup,
@@ -795,7 +822,7 @@ def main() -> int:
             hotwords=str(args.hotwords.resolve()) if args.hotwords else "",
             hotword_score=score,
         )
-        for model, threads, chunk, sil, pre, bp, pause, mode, beam, score in combos
+        for model, threads, chunk, th, ms, sil, pre, bp, pause, mode, beam, score in combos
     ]
     env = environment()
     args.results_dir.mkdir(parents=True, exist_ok=True)

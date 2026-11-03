@@ -4,7 +4,12 @@ from typing import Any
 
 import pytest
 
-from eval.segmentation import match_file, summarize_provisionals, summarize_segmentation
+from eval.segmentation import (
+    false_triggers,
+    match_file,
+    summarize_provisionals,
+    summarize_segmentation,
+)
 
 # 三句話：0–2 s、2.3–4 s（停頓 0.3 s）、5–6 s（停頓 1.0 s）
 SENTENCES = [
@@ -79,3 +84,20 @@ def test_result_latency_uses_provisional_covering_the_sentence() -> None:
     assert p["last_matches_final"] == 1.0
     assert p["redecode_ms"]["mean"] == pytest.approx(250 / 3)
     assert summarize_provisionals([{"segments": [_seg(0.0, 1.0, 1.5, 0.5)]}]) is None
+
+
+def test_false_triggers() -> None:
+    # 句子之前的噪音段（有輸出文字）、兩句之間的停頓（無文字）、邊緣只碰到句子 30 ms 的段都算誤觸發；
+    # 與句子重疊的段不算
+    segs = [
+        {**_seg(-1.0, -0.5, -0.2, -0.9), "text": "嗯 啊"},
+        {**_seg(-0.03, 2.03, 2.6, 1.0), "text": "第一句"},
+        {**_seg(2.05, 2.2, 2.6, 2.1), "text": ""},
+        {**_seg(2.2, 2.33, 2.8, 2.25), "text": "的"},
+        {**_seg(2.27, 6.03, 6.6, 3.3), "text": "後兩句"},
+    ]
+    assert false_triggers(SENTENCES, segs) == [0, 2, 3]
+    s = summarize_segmentation([{"sentences": SENTENCES, "segments": segs, "pauses_s": [0.3, 1.0]}])
+    assert s["false_triggers"] == 3
+    assert s["false_triggers_with_text"] == 2 and s["false_trigger_chars"] == 3
+    assert s["sentences_missed"] == 0  # 誤觸發不影響句子層級的指標

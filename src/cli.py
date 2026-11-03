@@ -27,7 +27,8 @@ def non_negative_int(value: str) -> int:
 def add_pipeline_args(p: argparse.ArgumentParser, sweep: bool = False) -> None:
     """加入 pipeline（VAD + ASR）的共用參數，預設值取自 `PipelineConfig()`。
 
-    `sweep=True` 時 --model / --threads / --chunk-ms / --pre-roll-ms / --min-silence-ms 可給多個值，
+    `sweep=True` 時 --model / --threads / --chunk-ms / --pre-roll-ms / --threshold / --min-speech-ms /
+    --min-silence-ms 可給多個值，
     值與預設都是 list（評測腳本取笛卡兒積）。
     """
     defaults = PipelineConfig()
@@ -50,7 +51,7 @@ def add_pipeline_args(p: argparse.ArgumentParser, sweep: bool = False) -> None:
         help="送入 ASR 時比 VAD 起點再往前多取的音訊長度",
         **multi(defaults.pre_roll_ms),
     )
-    p.add_argument("--threshold", type=float, default=vad.threshold, help="VAD 語音閾值")
+    p.add_argument("--threshold", type=float, help="VAD 語音閾值", **multi(vad.threshold))
     p.add_argument(
         "--neg-threshold",
         type=float,
@@ -58,7 +59,10 @@ def add_pipeline_args(p: argparse.ArgumentParser, sweep: bool = False) -> None:
         help="VAD 判為靜音的機率閾值（遲滯）；不給時取 threshold - 0.15",
     )
     p.add_argument(
-        "--min-speech-ms", type=non_negative_int, default=vad.min_speech_ms, help="VAD 最短語音"
+        "--min-speech-ms",
+        type=non_negative_int,
+        help="VAD 最短語音（語音持續滿此值才發出開始事件）",
+        **multi(vad.min_speech_ms),
     )
     p.add_argument(
         "--min-silence-ms",

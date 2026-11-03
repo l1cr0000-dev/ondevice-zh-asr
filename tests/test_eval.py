@@ -176,6 +176,8 @@ def test_run_config_name_marks_non_default_options() -> None:
     assert tail.name.endswith("_lead1000_tail1500_bp2")
     vad = RunConfig(**{**_cfg().__dict__, "vad_threshold": 0.6, "vad_neg_threshold": 0.5})
     assert vad.name.endswith("_lead1000_th0.6_neg0.5")
+    ms = RunConfig(**{**_cfg().__dict__, "vad_min_speech_ms": 96, "vad_threshold": 0.6})
+    assert ms.name.endswith("_lead1000_ms96_th0.6")
     hw = RunConfig(
         **{**_cfg().__dict__, "beam": 4, "hotwords": "/x/cabin.txt", "hotword_score": 2.0}
     )

@@ -11,7 +11,7 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
     --min-silence-ms 100 300 500 800 --pause-ms 0 --pre-roll-ms 0 100 200 300 --tag sweep   # 參數掃描
 ```
 
-多個值的參數（`--model`、`--min-silence-ms`、`--pre-roll-ms`、`--chunk-ms`、`--threads`）取笛卡兒積。
+多個值的參數（`--model`、`--threshold`、`--min-speech-ms`、`--min-silence-ms`、`--pre-roll-ms`、`--chunk-ms`、`--threads`）取笛卡兒積。`--min-speech-ms` 不是 250、`--threshold` 不是 0.5 時，結果名稱加 `_ms<值>` / `_th<值>`。
 `--jobs N` 以 N 個子程序並行（見下方「並行」）。`--limit N` 只跑前 N 句（除錯用；例如 `--smoke --limit 20` 約 5 秒 / 模型，改程式時先用它確認能跑通）。`--lead-silence-ms` 設定每條音訊前補的靜音（預設 1000，見首字延遲）。`--help` 列出全部參數與預設值。
 正式報告的數字一律用 3000 句評測集；`--smoke` 只用來在改動後快速確認結果沒變（200 句的 CER 信賴區間約 ±1 個百分點，不適合下結論）。
 `--manifest data/aishell1_test_full/manifest.jsonl` 可跑完整 7176 句（需先 `prepare_eval_data.py -n 7176`，約 1.1 GB）。
@@ -43,6 +43,10 @@ uv run eval/run_eval.py --model x-asr-480ms-int8 zipformer-zh-14m \
 - 限制：margin 內是原始錄音底噪、停頓中間是數位零，底噪不連續；句間停頓長度是人為分檔，不是真實口語的分佈，所以結果要**按停頓長度分開看**，整體平均值取決於分檔比例、沒有意義。沒有噪音。
 
 `run_eval.py --manifest data/aishell1_continuous_300/manifest.jsonl` 時，結果多一個 `metrics.segmentation`（見下方「斷句指標」）。
+
+### 只跑 VAD 的觸發時機掃描（B2）
+
+`uv run scripts/vad_trigger_sweep.py`：每條音訊只跑一次 Silero、快取逐 frame 機率，再以不同的 `min_speech_ms` × `threshold` 重播狀態機（其餘參數取 pipeline 預設，前後補靜音同 run_eval），一分鐘內掃完對齊 300 句、連續集與 5 個車內噪音 SNR。報告觸發延遲（VAD 開始事件 − MFA 真實首字起點）、起點偏移、切段 / 誤觸發，以及非語音區（離句子真實起訖 ≥ 0.2 s）的 VAD 機率 P99 / 最大值與超過閾值的 frame 數。句段與 run_eval 逐條相同，但沒有 ASR，誤觸發是否輸出文字要用 run_eval 看。
 
 ## 執行方式
 
@@ -147,6 +151,7 @@ VAD 起點首字延遲的細節：
 | `sentences_split_inside` | 與 2 個以上句段重疊的句子數（句中誤切） |
 | `sentences_missed` | 沒有任何句段重疊的句子數 |
 | `exact_files` | 句段與句子一一對應的條數 |
+| `false_triggers` | 與任何句子都不重疊的句段數（誤觸發）；`false_triggers_with_text` / `false_trigger_chars` 是其中輸出了文字的句段數與字數（全是插入錯誤）。誤觸發指標取自未合併的 `feat/b4-noise`（`d4f00da`，只取 eval 部分） |
 | `tail_latency_ms_by_pause` | 每句的**真實尾字延遲**：真實末字結束 → 與它重疊的最後一個句段的最終結果。依這句之後的停頓分組，`end` 是每條最後一句。兩句被合併時前一句要等合併的句段結束，延遲包含下一句的長度，這就是合併的代價 |
 | `first_token_latency_true_onset_ms` | 每句的**真實首字延遲**：句子是句段的第一句時（沒有被併入前一句），句段首字出現時刻 → 真實首字起點。與 VAD 無關（B5） |
 

@@ -8,6 +8,7 @@
   首字起點起算；連續集以每句真實起點起算（句子是句段第一句時）；冒煙集以補靜音結束起算（只看相對差）。
 - 穩定度（`eval.stability.summarize_stability`）：修正率、被改字 / 最終字（前綴口徑 / 對齊口徑）。
 - RTF 與重新辨識音訊比（`metrics.asr_compute.decoded_audio_ratio`，與機器負載無關）。
+- VAD 觸發與首字（以 VAD 起點起算）：每條第一個有字的句段的 `vad_start_delay_s` / `first_token_latency_s`。
 
 顯示規則（`eval.stability.FirstPartialRule`）只改畫面要不要顯示句段的第一個 partial，由結果 JSON 模擬：
 不顯示的 partial 從句段中拿掉，之後的指標全部照常計算。辨識結果與 CER 不受影響。
@@ -20,6 +21,10 @@
     uv run eval/run_eval.py --manifest data/aishell1_continuous_300/manifest.jsonl --model <模型...> --jobs 2
 用法：
     uv run scripts/first_partial_compare.py            # 印出 Markdown 表，數字另存 eval/results/
+    # 設定名不同的結果（例如 VAD min_speech 掃描，B2）：模型後加 @<設定名後綴>
+    uv run scripts/first_partial_compare.py --baseline sensevoice-small-int8-ort-p480-960-max3-zh \
+        --models sensevoice-small-int8-ort-p320-960-max3-zh@_ms0 --runs aishell1_align_300 \
+        --config sil1000_pre100_chunk10_t2_lead1000_tail1500_pause150fin --name vad_trigger
 """
 
 import argparse
@@ -29,6 +34,8 @@ from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -110,6 +117,19 @@ def visible_first_ms(
     return out
 
 
+def vad_first_ms(utts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """每條第一個有字的句段：VAD 觸發延遲與首字延遲（都以 VAD 起點起算，ms）。"""
+    trig: list[float] = []
+    first: list[float] = []
+    for u in utts:
+        seg = next((s for s in u["segments"] if s["text"].strip()), None)
+        if seg is None or seg["first_token_latency_s"] is None:
+            continue
+        trig.append(seg["vad_start_delay_s"] * 1000)
+        first.append(seg["first_token_latency_s"] * 1000)
+    return {"vad_start_delay_ms": summarize(trig), "first_token_vad_ms": summarize(first)}
+
+
 def _cer(base: list[dict[str, Any]], utts: list[dict[str, Any]]) -> dict[str, Any]:
     assert [u["id"] for u in base] == [u["id"] for u in utts], "兩個結果的句子不同"
     refs = [u["ref"] for u in utts]
@@ -140,6 +160,7 @@ def analyse(
 ) -> dict[str, Any]:
     out: dict[str, Any] = {"cer": _cer(base, utts)}
     out["rtf"] = sum(u["compute_s"] for u in utts) / sum(u["processed_s"] for u in utts)
+    out.update(vad_first_ms(utts))
     out["rules"] = {}
     for name, rule in RULES.items():
         shown = _with_rule(utts, rule)
@@ -156,6 +177,9 @@ def analyse(
 
 
 def _load(results_dir: Path, day: str, dataset: str, model: str, config: str) -> dict[str, Any]:
+    """`model` 可帶 `@<後綴>`：結果檔名的設定名 = config + 後綴（例如 `@_ms0`）。"""
+    model, _, suffix = model.partition("@")
+    config += suffix
     path = results_dir / f"{day}_{dataset}_{model}_{config}.json"
     if not path.is_file():
         raise FileNotFoundError(f"找不到 {path}，請先跑 run_eval（見 --help）")
@@ -168,7 +192,43 @@ def _pct(x: float | None) -> str:
 
 
 def _short(model: str) -> str:
-    return model.removeprefix("sensevoice-small-int8-ort-")
+    return model.removeprefix("sensevoice-small-int8-ort-").replace("@_", " ")
+
+
+def _diff(d: dict[str, Any] | None) -> str:
+    if d is None:
+        return "—"
+    lo, hi = d["ci95"]
+    return f"{d['mean']:+.0f} [{lo:+.0f}, {hi:+.0f}]"
+
+
+def paired_diff_ms(
+    base: dict[str, float], other: dict[str, float], resamples: int = 10000
+) -> dict[str, Any] | None:
+    """兩個設定在同一批句子上的平均差（other − base）與以句重抽的 95% 信賴區間。"""
+    ids = sorted(base.keys() & other.keys())
+    if not ids:
+        return None
+    d = np.array([other[i] - base[i] for i in ids])
+    rng = np.random.default_rng(0)
+    means = d[rng.integers(0, len(d), (resamples, len(d)))].mean(axis=1)
+    return {
+        "n": len(ids),
+        "mean": float(d.mean()),
+        "ci95": [float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))],
+    }
+
+
+def visible_first_by_id(
+    utts: list[dict[str, Any]], onset: Callable[[str], float] | None
+) -> dict[str, float]:
+    """單句集：句子 id → 可見首字（ms）。"""
+    out: dict[str, float] = {}
+    for u in utts:
+        times = [t for t in map(_first_visible_s, u["segments"]) if t is not None]
+        if times:
+            out[u["id"]] = (times[0] - (onset(u["id"]) if onset else 0.0)) * 1000
+    return out
 
 
 def print_tables(report: dict[str, Any], baseline: str) -> None:
@@ -176,10 +236,11 @@ def print_tables(report: dict[str, Any], baseline: str) -> None:
         n = next(iter(rows.values()))["cer"]["n_utts"]
         print(f"\n### {dataset}（{n} 條）\n")
         print(
-            "| 設定 | CER %（差 [95% CI]） | 最終文字相同 | RTF | 音訊比 | 第一個 partial："
-            "ASCII / 前綴一致 / 首字正確 | 可見首字 mean / P50 / P90 (ms) | 修正率 | 被改字（前綴 / 對齊） |"
+            "| 設定 | CER %（差 [95% CI]） | 最終文字相同 | RTF | 音訊比 | VAD 觸發 / 首字（VAD 起點）"
+            " mean (ms) | 第一個 partial：ASCII / 前綴一致 / 首字正確 | 可見首字 mean / P50 / P90 (ms) | "
+            "可見首字差 [95% CI] | 修正率 | 被改字（前綴 / 對齊） |"
         )
-        print("|" + "---|" * 9)
+        print("|" + "---|" * 11)
         for model, r in rows.items():
             c = r["cer"]
             cer = f"{c['cer'] * 100:.2f}"
@@ -193,9 +254,10 @@ def print_tables(report: dict[str, Any], baseline: str) -> None:
             print(
                 f"| {_short(model)} | {cer} | {_pct(c['same_hyp_ratio'])} | {r['rtf']:.3f} | "
                 f"{'—' if ratio is None else f'{ratio:.2f}'} | "
+                f"{r['vad_start_delay_ms']['mean']:.0f} / {r['first_token_vad_ms']['mean']:.0f} | "
                 f"{_pct(fp['ascii_ratio'])} / {_pct(fp['prefix_ratio'])} / "
                 f"{_pct(fp['first_char_ratio'])} | "
-                f"{v['mean']:.0f} / {v['p50']:.0f} / {v['p90']:.0f} | "
+                f"{v['mean']:.0f} / {v['p50']:.0f} / {v['p90']:.0f} | {_diff(r.get('visible_diff_ms'))} | "
                 f"{_pct(x['unstable_update_rate'])} | {_pct(x['revised_token_ratio'])} / "
                 f"{_pct(x['revised_token_ratio_aligned'])} |"
             )
@@ -229,6 +291,7 @@ def main() -> int:
     p.add_argument("--baseline", default=DEFAULT_BASELINE, help="CER 差的 A（現行預設）")
     p.add_argument("--models", nargs="+", default=DEFAULT_MODELS, help="比較的設定")
     p.add_argument("--runs", nargs="+", default=DEFAULT_RUNS, help="評測集目錄名")
+    p.add_argument("--name", default="first_partial_compare", help="輸出 JSON 檔名（日期之後）")
     args = p.parse_args()
 
     align: dict[str, float] = {}
@@ -259,10 +322,15 @@ def main() -> int:
             if keep(u)
         ]
         rows: dict[str, Any] = {}
+        base_visible = visible_first_by_id(base, onset)
         for model in [args.baseline, *args.models]:
             res = _load(args.results_dir, args.date, source, model, args.config)
             utts = [u for u in res["utterances"] if keep(u)]
             r = analyse(base, utts, onset, continuous)
+            if not continuous and model != args.baseline:
+                r["visible_diff_ms"] = paired_diff_ms(
+                    base_visible, visible_first_by_id(utts, onset)
+                )
             # 音訊比是整個結果檔的統計，短句子集不適用
             r["asr_compute"] = None if dataset == SHORT else res["metrics"].get("asr_compute")
             r["commit"] = res["environment"].get("commit")
@@ -270,7 +338,7 @@ def main() -> int:
         report["datasets"][dataset] = rows
 
     print_tables(report, args.baseline)
-    out = args.results_dir / f"{args.date}_first_partial_compare.json"
+    out = args.results_dir / f"{args.date}_{args.name}.json"
     out.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\n數字存於 {out}")
     return 0

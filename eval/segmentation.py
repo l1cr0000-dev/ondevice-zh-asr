@@ -6,6 +6,8 @@ speech_end_s] 與句子的真實語音區間交集超過 `MIN_OVERLAP_S`（避�
 - 句間邊界被合併：有一個句段同時與前後兩句重疊。
 - 句中誤切：一句話與 2 個以上句段重疊。
 - 漏句：一句話沒有任何句段與它重疊。
+- 誤觸發：一個句段與任何參考句子都不重疊（例如噪音被當成語音）。另報其中輸出了文字的個數與字數
+  （這些字全部是插入錯誤）。
 - 每句尾字延遲：句子真實末字結束 → 與它重疊的最後一個句段的最終結果。兩句被合併時，前一句的完整文字
   要等合併後的句段結束才出現，延遲自然變大，這就是合併的代價。依「這句之後的停頓長度」分組報告。
 - 每句結果延遲（有暫定結果時）：句子真實末字結束 → 第一個涵蓋整句的結果（暫定結果或最終結果，取早者）。
@@ -82,6 +84,17 @@ def match_file(
     return out
 
 
+def false_triggers(
+    sentences: Sequence[dict[str, Any]], segments: Sequence[dict[str, Any]]
+) -> list[int]:
+    """與任何參考句子都不重疊的句段索引。"""
+    return [
+        j
+        for j, seg in enumerate(segments)
+        if not any(_overlap(seg, s["start_s"], s["end_s"]) > MIN_OVERLAP_S for s in sentences)
+    ]
+
+
 def summarize_segmentation(files: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """`files` 每筆含 `sentences`、`segments`、`pauses_s`（句間停頓的標稱值，用來分組）。"""
     boundaries: dict[str, list[bool]] = defaultdict(list)  # 停頓 → 是否被切開
@@ -89,8 +102,14 @@ def summarize_segmentation(files: Sequence[dict[str, Any]]) -> dict[str, Any]:
     results: dict[str, list[float]] = defaultdict(list)
     first_ms: list[float] = []
     n_sent = split_inside = missed = exact_files = 0
+    false_n = false_with_text = false_chars = 0
     for f in files:
         rows = match_file(f["sentences"], f["segments"])
+        for j in false_triggers(f["sentences"], f["segments"]):
+            text = "".join(f["segments"][j].get("text", "").split())
+            false_n += 1
+            false_with_text += bool(text)
+            false_chars += len(text)
         exact = len(f["segments"]) == len(rows)
         for i, r in enumerate(rows):
             n_sent += 1
@@ -121,6 +140,9 @@ def summarize_segmentation(files: Sequence[dict[str, Any]]) -> dict[str, Any]:
         },
         "sentences_split_inside": split_inside,
         "sentences_missed": missed,
+        "false_triggers": false_n,
+        "false_triggers_with_text": false_with_text,
+        "false_trigger_chars": false_chars,
         "tail_latency_ms_by_pause": {k: summarize(tails[k]) for k in order if k in tails},
         "tail_latency_ms": summarize([t for v in tails.values() for t in v]),
         # 暫定或最終結果，取早者；沒有暫定結果時與 tail_latency_ms_by_pause 相同
