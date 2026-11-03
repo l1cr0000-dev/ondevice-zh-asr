@@ -2,7 +2,7 @@
 
 ## 專案目標
 
-在 Apple 設備上實現**離線、低延遲的端側中文串流語音辨識全鏈路**：
+在端側設備（Mac、iPhone、Android）上實現**離線、低延遲的中文串流語音辨識全鏈路**：
 
 ```
 麥克風 / wav → VAD → 串流 ASR → 文字輸出 → 評測
@@ -14,17 +14,16 @@
 
 | 階段 | 內容 | 完成標準 |
 |---|---|---|
-| 1（目前） | VAD + 串流 ASR + 評測框架 | 一條命令跑完評測集，輸出 CER / RTF / 首字延遲 / 峰值記憶體 / 模型大小 |
-| 2 | 量化（INT8 / FP16）、Core ML 轉換 | 與階段 1 基準逐項對比，記錄精度損失與加速比 |
-| 3 | iOS demo（Swift + Core ML） | 真機上即時辨識，並量測裝置端指標 |
+| 1 ✅ | VAD + 串流 ASR + 評測框架、延遲優化與模型選型 | 一條命令跑完評測集，輸出 CER / RTF / 首字延遲 / 峰值記憶體 / 模型大小 |
+| 2（目前） | 端側適配：C++ 辨識核心 + onnxruntime，Mac app、iPhone、Android | 三個平台真機即時辨識，量測裝置端指標並與 Python 模擬值對比 |
 
-第一階段**不做**：量化、Core ML、iOS、自訓練模型、說話人分離、標點恢復。需要時另開討論，不要順手加。
+預設模型為 SenseVoice Small INT8 偽串流（2026-11-02 起）。**暫緩**：量化精度對比（FP32 / FP16 / 自行 INT8，2026-11-03 決定，先用官方 INT8）、泛化驗證（算力允許時，見 `docs/limitations.md`）、噪音與垂直領域適配。**不做**：自訓練模型、說話人分離、標點恢復。需要時另開討論，不要順手加。
 
 ## 硬體限制
 
-- **只有 Apple 設備**：Apple Silicon Mac、iPhone/iPad。沒有 Android、沒有開發板、沒有 NVIDIA GPU。
-- 推論後端只考慮：CPU（ONNX Runtime / sherpa-onnx）、Metal（MPS）、Core ML（CPU / GPU / ANE）。
-- 不要引入需要 CUDA 的依賴，也不要建議需要非 Apple 硬體驗證的方案。
+- **可用設備**：Apple Silicon Mac（開發機）、iPhone/iPad、Android 真機（2026-11-03 起）。沒有開發板、沒有 NVIDIA GPU。
+- 推論後端只考慮：CPU（ONNX Runtime / sherpa-onnx）；Apple 平台加 Metal（MPS）、Core ML（CPU / GPU / ANE）；Android 平台加 NNAPI / XNNPACK。
+- 不要引入需要 CUDA 的依賴，也不要建議需要上述設備以外硬體驗證的方案。
 
 ## 候選技術棧（待驗證，以評測結果為準）
 
