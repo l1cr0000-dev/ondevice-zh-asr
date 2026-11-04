@@ -145,13 +145,14 @@
 
 - 沒有 CI 自動跑 pytest / mypy / ruff。
 - 專案沒有安裝成套件，`scripts/` 與 `eval/run_eval.py` 都靠 `sys.path.insert` 才能 import `src`。根治要改成可安裝套件（頂層名稱 `src` 需改名），改動面大。
-- 沒有 git remote，README 的 `<repo-url>` 待補；本專案自己的 License 未定（第三方授權已查清，見 [models.md](models.md)）。
+- 2026-11-04：已建 private repo `l1cr0000-dev/ondevice-zh-asr`、補上 README clone URL；程式碼採 MIT（`LICENSE`）。轉 public 前仍須先完成 B13。
 
 ### B13　公開前替換測試 fixture（P1，公開 repo 前必做）
 
 - **現況**：`tests/fixtures/vad_two_utterances.wav` 由 macOS `say`（Tingting）合成，自 `ea86c17` 起已在 git 歷史中。macOS 軟體授權第 2 條 F 款排除在公開分享情境中發布或散布系統語音，公開 GitHub repo 屬於此情境。
 - **做法**：改用自錄音訊或 AISHELL-1 句子（Apache-2.0，附來源）重做 fixture 與 JSON 標註，更新 `make_vad_fixture.py`；公開前改寫歷史或另開乾淨的公開 repo。同時新增 LICENSE、補上 `<repo-url>`。
 - **完成標準**：git 歷史中沒有系統語音產生的音訊，`uv run pytest` 全部通過。
+- **現況（2026-11-04）**：repo 先以 private 建立並上傳，B13 完成後再轉 public。
 
 ---
 

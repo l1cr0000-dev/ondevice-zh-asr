@@ -77,7 +77,8 @@ VAD 確認的 291 ms 被「等第一個 chunk 收滿」蓋住（pre-roll 的音�
 **所有 `uv run` 都要在 `ondevice-zh-asr/` 目錄內執行**，在外層執行會用到別的 Python 而缺套件。
 
 ```bash
-git clone <repo-url> && cd ondevice-zh-asr   # repo 尚未公開，<repo-url> 待補
+git clone https://github.com/l1cr0000-dev/ondevice-zh-asr.git
+cd ondevice-zh-asr
 uv sync                                   # 安裝依賴（uv 會自動下載 Python 3.11）
 uv run scripts/check_env.py               # 檢查環境：最後一行應為 OK
 bash scripts/download_models.sh           # 下載模型到 models/（5 個模型，解壓後約 640 MB，含 SHA-256 校驗，可重複執行）
@@ -324,4 +325,4 @@ models/ data/  模型與資料（不進版控，由 scripts/ 下載並校驗）
 
 ## License
 
-TBD。第三方模型與資料：X-ASR、zipformer-zh-14M 為 Apache-2.0，Silero VAD 為 MIT，AISHELL-1 為 Apache-2.0；本 repo 不散布模型權重與評測音訊，由 `scripts/` 從上游下載。來源與查證細節見 [docs/models.md](docs/models.md)。
+本 repo 的程式碼採 [MIT License](LICENSE)。第三方模型與資料：X-ASR、zipformer-zh-14M 為 Apache-2.0，Silero VAD 為 MIT，AISHELL-1 為 Apache-2.0；本 repo 不散布模型權重與評測音訊，由 `scripts/` 從上游下載。來源與查證細節見 [docs/models.md](docs/models.md)。
